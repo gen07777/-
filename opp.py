@@ -120,3 +120,99 @@ ax.axhline(y=target_cm, color='black', linestyle='--', linewidth=1)
 # 3. 塗りつぶし & 時間検出ロジック
 # 条件: 指定潮位以下 かつ 指定時間内
 hours = df['raw_time'].dt.hour
+# end_hourが24の場合は23:59まで含むため < 24 とするなどの調整
+# sliderの23は「23時台まで」つまり 23:59 までを含むと解釈して実装
+time_condition = (hours >= start_hour) & (hours <= end_hour if end_hour < 24 else 24)
+level_condition = (df['Level_cm'] <= target_cm)
+
+# 赤く塗りつぶす
+ax.fill_between(df['raw_time'], df['Level_cm'], target_cm, 
+                where=(level_condition & time_condition), 
+                color='red', alpha=0.3, interpolate=True)
+
+# 4. 「開始」「終了」「継続時間」のラベル表示
+# 連続した区間（塊）を見つけて処理する
+in_zone = False
+zone_start_time = None
+label_counter = 0 # 重なり防止用のカウンタ
+
+# データを走査して区間を検出
+# iterrowsは遅いので単純ループで処理
+times = df['raw_time'].tolist()
+levels = df['Level_cm'].tolist()
+n_points = len(times)
+
+for i in range(n_points):
+    t = times[i]
+    lvl = levels[i]
+    h = t.hour
+    
+    # フィルタ条件チェック
+    is_target = (lvl <= target_cm) and (start_hour <= h <= (end_hour if end_hour < 24 else 24))
+    
+    if is_target and not in_zone:
+        # 区間開始 (Start)
+        in_zone = True
+        zone_start_time = t
+        
+        # 開始時間のラベル (引き出し線)
+        # カウンタを使って高さを変える (30, 60, 90...)
+        offset = 30 + (label_counter % 3) * 25
+        
+        time_str = t.strftime("%H:%M")
+        ax.annotate(
+            time_str, xy=(t, target_cm), xytext=(-10, offset),
+            textcoords='offset points', ha='center', va='bottom', fontsize=8,
+            color='blue', arrowprops=dict(arrowstyle='->', color='blue', linewidth=0.5)
+        )
+        
+    elif not is_target and in_zone:
+        # 区間終了 (End)
+        in_zone = False
+        zone_end_time = times[i-1] # ひとつ前のポイントが最後
+        
+        # 終了時間のラベル
+        offset = 30 + (label_counter % 3) * 25 # 開始と同じ高さにする
+        time_str = zone_end_time.strftime("%H:%M")
+        ax.annotate(
+            time_str, xy=(zone_end_time, target_cm), xytext=(10, offset),
+            textcoords='offset points', ha='center', va='bottom', fontsize=8,
+            color='blue', arrowprops=dict(arrowstyle='->', color='blue', linewidth=0.5)
+        )
+        
+        # ★時間の長さ (Duration) を真ん中に表示★
+        duration = zone_end_time - zone_start_time
+        total_minutes = int(duration.total_seconds() / 60)
+        if total_minutes >= 10: # 10分以上ある場合のみ表示
+            hours_dur = total_minutes // 60
+            mins_dur = total_minutes % 60
+            dur_str = f"{hours_dur}h {mins_dur}m" # 英語表記で文字化け回避
+            
+            # 区間の真ん中の時間
+            mid_time = zone_start_time + (duration / 2)
+            
+            # グラフの下の方、またはターゲットラインの少し下に表示
+            ax.text(mid_time, target_cm - 15, dur_str, 
+                    ha='center', va='top', fontsize=9, fontweight='bold', color='#cc0000')
+            
+        label_counter += 1
+
+# グラフ装飾
+ax.set_ylabel("Level (cm)")
+ax.grid(True, which='both', linestyle='--', alpha=0.3)
+ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%d')) # 日付のみ
+plt.xlim(df['raw_time'].min(), df['raw_time'].max())
+
+st.pyplot(fig)
+
+# リスト表示 (詳細データ)
+with st.expander("詳細リストを表示"):
+    # フィルタ条件に合うデータを抽出して表示
+    filtered_df = df[level_condition & time_condition].copy()
+    if not filtered_df.empty:
+        filtered_df['Date'] = filtered_df['raw_time'].dt.strftime('%m/%d')
+        filtered_df['Time'] = filtered_df['raw_time'].dt.strftime('%H:%M')
+        st.dataframe(filtered_df[['Date', 'Time', 'Level_cm']], use_container_width=True)
+    else:
+        st.write("条件に合う時間帯はありません。")
