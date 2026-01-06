@@ -8,7 +8,7 @@ import matplotlib.dates as mdates
 import re
 
 # ---------------------------------------------------------
-# アプリ設定 (必ず一番最初に書く)
+# アプリ設定
 # ---------------------------------------------------------
 st.set_page_config(layout="wide")
 
@@ -63,16 +63,18 @@ class OnishiTideCalculator:
 # ---------------------------------------------------------
 # メイン画面構成
 # ---------------------------------------------------------
-st.title("大西港 潮位")
+st.title("大西港 潮位ビジュアライザー")
 
-# --- サイドバー設定エリア ---
-with st.sidebar:
-    st.header("条件設定")
-    
-    # 1. 年の選択
+# --- 設定エリア（タイトルの下に配置） ---
+st.markdown("### 条件設定")
+
+# 1行目: 年、期間
+col1, col2 = st.columns(2)
+with col1:
     year_sel = st.number_input("対象年", value=datetime.date.today().year)
-    
-    # 2. 期間選択リスト (1月前半〜12月後半)
+
+with col2:
+    # 期間選択リスト
     period_options = []
     for m in range(1, 13):
         period_options.append(f"{m}月前半 (1日-15日)")
@@ -82,26 +84,27 @@ with st.sidebar:
     default_index = (current_month - 1) * 2
     
     selected_period = st.selectbox(
-        "表示する期間を選択",
+        "表示期間",
         period_options,
         index=default_index
     )
-    
-    st.divider()
-    
-    # 3. 潮位設定 (初期値を120に変更)
+
+# 2行目: 潮位、時間帯
+col3, col4 = st.columns(2)
+with col3:
     target_cm = st.number_input("基準潮位 (cm)", value=120, step=10, help="この高さより低い時間を探します")
-    
-    st.subheader("活動時間フィルタ")
-    # 4. 時間設定 (初期値 7:00 - 23:00)
+
+with col4:
+    # 時間スライダー (0-24)
     start_hour, end_hour = st.slider(
-        "グラフに色を塗る時間帯:",
+        "活動時間 (この時間内のみ抽出)",
         0, 24, (7, 23),
         format="%d時"
     )
 
+st.divider()
+
 # --- データ生成 ---
-# 文字列から月と期間を判定
 match = re.match(r"(\d+)月(..)", selected_period)
 if match:
     month_sel = int(match.group(1))
@@ -121,26 +124,33 @@ data = calculator.get_period_data(year_sel, month_sel, start_d, end_d)
 df = pd.DataFrame(data)
 
 if df.empty:
-    st.error("データがありません。日付を確認してください。")
+    st.error("データがありません。設定を確認してください。")
 else:
     # ---------------------------------------------------------
-    # グラフ描画 (エラー回避のため、グラフ内文字は英語固定)
+    # グラフ描画
     # ---------------------------------------------------------
     st.subheader(f"潮位グラフ: {selected_period}")
 
     fig, ax = plt.subplots(figsize=(15, 8))
 
-    # 1. 潮位線
+    # 1. 潮位線 (全時間表示)
     ax.plot(df['raw_time'], df['Level_cm'], color='#1f77b4', linewidth=1.5, alpha=0.8, label="Tide Level")
 
     # 2. 基準線
     ax.axhline(y=target_cm, color='black', linestyle='--', linewidth=1, label=f"Target ({target_cm}cm)")
 
-    # 3. 塗りつぶし
+    # 3. 塗りつぶし & 判定ロジック (時刻修正版)
     hours = df['raw_time'].dt.hour
-    is_time_ok = (hours >= start_hour) & (hours <= (end_hour if end_hour < 24 else 24))
+    
+    # 【修正ポイント】
+    # start_hour以上、かつ end_hour "未満" に設定
+    # 例: 7〜23の場合 -> 7:00は含む(>=7), 23:00になったら終了(<23)
+    # ※ end_hourが24の場合は「日の終わりまで」なので全ての時間(<24)でOK
+    is_time_ok = (hours >= start_hour) & (hours < end_hour)
+    
     is_level_ok = (df['Level_cm'] <= target_cm)
     
+    # 条件に合う場所を赤く塗る
     ax.fill_between(df['raw_time'], df['Level_cm'], target_cm, 
                     where=(is_level_ok & is_time_ok), 
                     color='red', alpha=0.3, interpolate=True)
@@ -159,6 +169,7 @@ else:
         duration = end_t - start_t
         total_minutes = int(duration.total_seconds() / 60)
         
+        # 10分未満は表示しない
         if total_minutes < 10: continue
 
         y_offset = 20 + (label_offset_counter % 2) * 25
@@ -182,7 +193,7 @@ else:
             arrowprops=dict(arrowstyle='->', color='blue', linewidth=0.5)
         )
 
-        # Duration
+        # Duration (1h 20m)
         hours_dur = total_minutes // 60
         mins_dur = total_minutes % 60
         dur_str = f"{hours_dur}h {mins_dur}m"
@@ -201,14 +212,3 @@ else:
     ax.set_xlim(df['raw_time'].iloc[0], df['raw_time'].iloc[-1])
     
     st.pyplot(fig)
-
-    # 詳細リスト
-    with st.expander("詳細データリスト"):
-        export_df = df[df['in_target']].copy()
-        if not export_df.empty:
-            export_df['Date'] = export_df['raw_time'].dt.strftime('%m/%d')
-            export_df['Time'] = export_df['raw_time'].dt.strftime('%H:%M')
-            st.dataframe(export_df[['Date', 'Time', 'Level_cm']], use_container_width=True)
-        else:
-            st.write("条件に該当する時間帯はありません。")
-
