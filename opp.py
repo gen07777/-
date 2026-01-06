@@ -5,7 +5,6 @@ import calendar
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import re
 
 # ---------------------------------------------------------
 # アプリ設定
@@ -65,8 +64,12 @@ col1, col2 = st.columns(2)
 with col1:
     year_sel = st.number_input("対象年", value=datetime.date.today().year)
 with col2:
-    period_options = [f"{m}月前半 (1日-15日)" for m in range(1, 13)] + [f"{m}月後半 (16日-末日)" for m in range(1, 13)]
-    period_options.sort(key=lambda x: int(re.match(r"(\d+)", x).group(1)) + (0.5 if "後半" in x else 0))
+    # シンプルで壊れないリスト作成方法に変更
+    period_options = []
+    for m in range(1, 13):
+        period_options.append(f"{m}月前半 (1日-15日)")
+        period_options.append(f"{m}月後半 (16日-末日)")
+    
     current_month = datetime.date.today().month
     default_index = (current_month - 1) * 2
     selected_period = st.selectbox("表示期間", period_options, index=default_index)
@@ -79,13 +82,21 @@ with col4:
 
 st.divider()
 
-# --- データ生成 ---
-match = re.match(r"(\d+)月(..)", selected_period)
-month_sel = int(match.group(1)) if match else 1
-period_type = match.group(2) if match else "前半"
+# --- データ生成 (安全な文字解析に変更) ---
+# "10月前半..." のような文字から数字を取り出す
+try:
+    month_str = selected_period.split('月')[0]
+    month_sel = int(month_str)
+    is_first_half = "前半" in selected_period
+except:
+    month_sel = 1
+    is_first_half = True
 
 last_day = calendar.monthrange(year_sel, month_sel)[1]
-start_d, end_d = (1, 15) if "前半" in period_type else (16, last_day)
+if is_first_half:
+    start_d, end_d = 1, 15
+else:
+    start_d, end_d = 16, last_day
 
 calculator = OnishiTideCalculator()
 data = calculator.get_period_data(year_sel, month_sel, start_d, end_d)
@@ -99,7 +110,8 @@ else:
     # ---------------------------------------------------------
     st.subheader(f"潮位グラフ: {selected_period}")
 
-    fig, ax = plt.subplots(figsize=(15, 9)) # 縦幅を広げて文字スペース確保
+    # 縦幅を大きくして文字が重ならないようにする
+    fig, ax = plt.subplots(figsize=(15, 9))
 
     # 潮位線 & 基準線
     ax.plot(df['raw_time'], df['Level_cm'], color='#1f77b4', linewidth=1.5, alpha=0.8, label="Tide Level")
@@ -130,7 +142,49 @@ else:
         
         if total_minutes < 10: continue
 
-        # 高さオフセットを「3段階」で大きく回す (30, 70, 110)
+        # 高さオフセットを「3段階」で大きく回す (40, 90, 140)
         # これにより隣り合う文字が絶対に被らないようにする
-        y_offset = 30 + (label_offset_counter % 3) * 40
+        y_offset = 40 + (label_offset_counter % 3) * 50
         label_offset_counter += 1
+
+        # Start Time (青矢印) - 左上へ
+        ax.annotate(
+            start_t.strftime("%H:%M"), 
+            xy=(start_t, target_cm), 
+            xytext=(-10, y_offset), 
+            textcoords='offset points', ha='right', va='bottom', 
+            fontsize=10, color='blue', fontweight='bold',
+            arrowprops=dict(arrowstyle='->', color='blue', linewidth=1, connectionstyle="arc3,rad=-0.2")
+        )
+
+        # End Time (青矢印) - 右上へ
+        ax.annotate(
+            end_t.strftime("%H:%M"), 
+            xy=(end_t, target_cm), 
+            xytext=(10, y_offset), 
+            textcoords='offset points', ha='left', va='bottom', 
+            fontsize=10, color='blue', fontweight='bold',
+            arrowprops=dict(arrowstyle='->', color='blue', linewidth=1, connectionstyle="arc3,rad=0.2")
+        )
+
+        # Duration (赤文字) - 基準線の下に固定
+        hours_dur = total_minutes // 60
+        mins_dur = total_minutes % 60
+        dur_str = f"{hours_dur}h{mins_dur}m"
+        mid_time = start_t + (duration / 2)
+        
+        # 基準線より下に表示 (白枠付きで見やすく)
+        ax.text(mid_time, target_cm - 25, dur_str, 
+                ha='center', va='top', fontsize=9, fontweight='bold', color='#cc0000',
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="lightgray", alpha=0.9))
+
+    # レイアウト
+    ax.set_ylabel("Level (cm)")
+    ax.grid(True, which='both', linestyle='--', alpha=0.3)
+    ax.legend(loc='upper right')
+    
+    ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d'))
+    ax.set_xlim(df['raw_time'].iloc[0], df['raw_time'].iloc[-1])
+    
+    st.pyplot(fig)
