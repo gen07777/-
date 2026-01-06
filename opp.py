@@ -63,7 +63,7 @@ class OnishiTideCalculator:
 # ---------------------------------------------------------
 # メイン画面構成
 # ---------------------------------------------------------
-st.title("大西港 潮位ビジュアライザー")
+st.title("大西港 潮位")
 
 # --- サイドバー設定エリア ---
 with st.sidebar:
@@ -211,3 +211,4 @@ else:
             st.dataframe(export_df[['Date', 'Time', 'Level_cm']], use_container_width=True)
         else:
             st.write("条件に該当する時間帯はありません。")
+
