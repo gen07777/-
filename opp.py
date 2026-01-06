@@ -1,142 +1,66 @@
-import streamlit as st
-import datetime
-import math
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-# ---------------------------------------------------------
-# Tide Calculation Logic
-# ---------------------------------------------------------
-class OnishiTideCalculator:
-    def __init__(self):
-        self.CORRECTION_RATIO = 1.0
-        self.TIME_OFFSET_MINUTES = 0
-        self.MSL = 250.0 
-        self.CONSTITUENTS = {
-            'M2': {'amp': 130.0, 'phase': 200.0, 'speed': 28.9841042},
-            'S2': {'amp': 50.0,  'phase': 230.0, 'speed': 30.0000000},
-            'K1': {'amp': 35.0,  'phase': 180.0, 'speed': 15.0410686},
-            'O1': {'amp': 30.0,  'phase': 160.0, 'speed': 13.9430356}
-        }
+# --- 1. 設定部分 ---
+TARGET_LEVEL = 140  # 指定潮位 (cm)
+START_DATE = '2024-01-01'
+END_DATE = '2024-02-01' # 1ヶ月分
 
-    def _calculate_astronomical_tide(self, target_datetime):
-        base_date = datetime.datetime(target_datetime.year, 1, 1)
-        delta_hours = (target_datetime - base_date).total_seconds() / 3600.0
-        tide_height = self.MSL
-        for name, const in self.CONSTITUENTS.items():
-            theta = math.radians(const['speed'] * delta_hours - const['phase'])
-            tide_height += const['amp'] * math.cos(theta)
-        return tide_height
+# --- 2. データ生成 (実際はここでCSV読み込みやAPI取得を行います) ---
+# 10分刻みの時間データを作成
+dates = pd.date_range(start=START_DATE, end=END_DATE, freq='10T')
 
-    def get_onishi_prediction(self, target_date):
-        # Create data every 10 minutes for smoother graph
-        detailed_data = []
-        # Calculate for 0:00 to 23:50
-        start_time = datetime.datetime(target_date.year, target_date.month, target_date.day)
-        
-        for i in range(24 * 6): # 24 hours * 6 (every 10 mins)
-            calc_time = start_time + datetime.timedelta(minutes=i * 10)
-            
-            # Apply offset
-            calc_time_offset = calc_time - datetime.timedelta(minutes=self.TIME_OFFSET_MINUTES)
-            base_level = self._calculate_astronomical_tide(calc_time_offset)
-            onishi_level = base_level * self.CORRECTION_RATIO
-            
-            detailed_data.append({
-                "raw_time": calc_time,
-                "Level_cm": onishi_level
-            })
-        return detailed_data
+# 疑似的な潮汐データを作成 (サイン波の合成で潮の満ち引きを再現)
+# 実際には `df['tide_level']` のように実データを使用してください
+t = np.arange(len(dates))
+tide_levels = 100 + 60 * np.sin(t / 70) + 30 * np.sin(t / 365) + np.random.normal(0, 2, len(t))
 
-    def find_times_for_target_level(self, detailed_data, target_level):
-        found_times = []
-        # Check intervals
-        for i in range(len(detailed_data) - 1):
-            p1 = detailed_data[i]
-            p2 = detailed_data[i+1]
-            y1 = p1['Level_cm']
-            y2 = p2['Level_cm']
-            
-            if (y1 <= target_level <= y2) or (y1 >= target_level >= y2):
-                # Linear interpolation
-                if y2 == y1: continue
-                fraction = (target_level - y1) / (y2 - y1)
-                minutes_add = fraction * 10 # 10 minute interval
-                found_time = p1['raw_time'] + datetime.timedelta(minutes=minutes_add)
-                
-                trend = "UP" if y2 > y1 else "DOWN"
-                time_str = found_time.strftime("%H:%M")
-                found_times.append(f"{time_str} ({trend})")
-        return found_times
+df = pd.DataFrame({'timestamp': dates, 'level': tide_levels})
 
-# ---------------------------------------------------------
-# App Layout
-# ---------------------------------------------------------
-st.title("Tide Visualizer")
-st.write("Onishi Port")
+# --- 3. 指定潮位との交点（時間）を計算するロジック ---
+# 前のデータと現在のデータの間で、指定潮位をまたいだ場所を探す
+# sign: 潮位が指定値より上なら1, 下なら-1
+signs = np.sign(df['level'] - TARGET_LEVEL)
+# diff: 符号が変わった場所（またいだ場所）が非ゼロになる
+crossing_indices = np.where(np.diff(signs))[0]
 
-# 1. Inputs
-col1, col2 = st.columns(2)
-with col1:
-    target_date = st.date_input("Date", datetime.date.today())
-with col2:
-    target_cm = st.number_input("Target Level (cm)", value=150, step=10)
+# 交点の時間と潮位を取得
+crossing_dates = df['timestamp'].iloc[crossing_indices]
+crossing_levels = df['level'].iloc[crossing_indices]
 
-# 2. Calculation
-calculator = OnishiTideCalculator()
-# Ensure correct date type
-calc_date = datetime.datetime(target_date.year, target_date.month, target_date.day)
-prediction_data = calculator.get_onishi_prediction(calc_date)
+# --- 4. グラフ描画 ---
+fig, ax = plt.subplots(figsize=(15, 6)) # 1ヶ月分なので横長にする
 
-# 3. Result Text
-st.subheader(f"Time for {target_cm} cm")
-matched_times = calculator.find_times_for_target_level(prediction_data, target_cm)
+# メインの潮位線
+ax.plot(df['timestamp'], df['level'], label='Tide Level', color='blue', linewidth=1)
 
-if matched_times:
-    st.success(" / ".join(matched_times))
-else:
-    st.info("Level not reached on this date.")
+# 指定潮位のライン（赤色・破線）
+ax.axhline(y=TARGET_LEVEL, color='red', linestyle='--', label=f'Target: {TARGET_LEVEL}cm')
 
-# 4. Matplotlib Graph (Fixes 'removeChild' error and allows fill)
-st.subheader("Visual Graph")
+# 指定潮位に到達した時間（交点）をプロット
+ax.scatter(crossing_dates, crossing_levels, color='red', zorder=5, s=30, marker='o')
 
-# Prepare DataFrame
-df = pd.DataFrame(prediction_data)
+# --- 5. グラフの見た目を調整 ---
+ax.set_title(f"Tide Graph ({START_DATE} - {END_DATE})", fontsize=14)
+ax.set_ylabel("Tide Level (cm)")
+ax.set_xlabel("Date")
+ax.grid(True, which='both', linestyle='--', alpha=0.5)
 
-# Create Plot
-fig, ax = plt.subplots(figsize=(10, 5))
+# 横軸の日付フォーマット調整 (1ヶ月分を見やすく)
+ax.xaxis.set_major_locator(mdates.DayLocator(interval=2)) # 2日おきに目盛り
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+plt.xticks(rotation=45) # 日付が重ならないように斜めにする
 
-# Plot the main tide line
-ax.plot(df['raw_time'], df['Level_cm'], label='Tide Level', color='#1f77b4', linewidth=2)
+# 凡例を表示
+ax.legend()
 
-# Plot the target line
-ax.axhline(y=target_cm, color='black', linestyle='--', linewidth=1, label=f'Target ({target_cm}cm)')
+# レイアウト調整と表示
+plt.tight_layout()
+plt.show()
 
-# FILL LOGIC: Fill red where tide is BELOW target
-# "where" condition: Level <= target
-ax.fill_between(df['raw_time'], df['Level_cm'], target_cm, 
-                where=(df['Level_cm'] <= target_cm), 
-                color='red', alpha=0.3, interpolate=True, label='Below Target')
-
-# Formatting
-ax.set_ylabel("Level (cm)")
-ax.set_title(f"Tide on {target_date.strftime('%Y-%m-%d')}")
-ax.grid(True, alpha=0.3)
-ax.legend(loc='upper right')
-
-# X-axis formatting (Hours)
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-ax.xaxis.set_major_locator(mdates.HourLocator(interval=3)) # Show every 3 hours
-plt.xticks(rotation=0)
-
-# Display in Streamlit
-st.pyplot(fig)
-
-# Show data table inside expander
-with st.expander("Show Detailed Data"):
-    # Format time for display
-    display_df = df.copy()
-    display_df['Time'] = display_df['raw_time'].apply(lambda x: x.strftime('%H:%M'))
-    display_df['Level_cm'] = display_df['Level_cm'].round(1)
-    st.dataframe(display_df[['Time', 'Level_cm']])
+# --- (参考) 指定潮位になった時間をリスト表示 ---
+print(f"--- 指定潮位 ({TARGET_LEVEL}cm) に到達した時間 ---")
+for d in crossing_dates:
+    print(d.strftime('%Y-%m-%d %H:%M'))
