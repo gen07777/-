@@ -109,7 +109,7 @@ else:
     # ---------------------------------------------------------
     st.subheader(f"潮位グラフ: {selected_period}")
 
-    # 縦幅を広げて上下の表示スペースを確保
+    # 縦幅を大きく確保
     fig, ax = plt.subplots(figsize=(15, 10))
 
     # 潮位線 & 基準線
@@ -156,8 +156,8 @@ else:
         
         ax.annotate(
             start_t.strftime("%H:%M"), 
-            xy=(start_t, target_cm),        # 矢印の先端
-            xytext=(0, y_pos_start - target_cm), # テキスト位置(相対)
+            xy=(start_t, target_cm),
+            xytext=(0, y_pos_start - target_cm),
             textcoords='offset points', 
             ha='center', va='bottom', 
             fontsize=font_size, color='blue', fontweight='bold',
@@ -172,4 +172,42 @@ else:
         
         ax.annotate(
             end_t.strftime("%H:%M"), 
-            xy=(end_t, target_cm),
+            xy=(end_t, target_cm), 
+            xytext=(0, y_pos_end - target_cm), 
+            textcoords='offset points', 
+            ha='center', va='top', 
+            fontsize=font_size, color='green', fontweight='bold',
+            arrowprops=dict(arrowstyle='-', color='green', linewidth=0.5, linestyle=':')
+        )
+
+        # -------------------------------------------------
+        # 3. 継続時間 (Duration) -> 赤色 / さらに下に表示
+        # -------------------------------------------------
+        hours_dur = total_minutes // 60
+        mins_dur = total_minutes % 60
+        dur_str = f"{hours_dur}h{mins_dur}m"
+        
+        mid_time = start_t + (duration / 2)
+        
+        # 終了時間よりさらに下に配置 (緑文字と被らないように)
+        y_pos_dur = y_pos_end - 15 
+
+        # ax.text で配置 (シンプル化)
+        ax.text(
+            mid_time, y_pos_dur, dur_str, 
+            ha='center', va='top', 
+            fontsize=font_size, fontweight='bold', color='#cc0000',
+            bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.6)
+        )
+
+    # レイアウト
+    ax.set_ylabel("Level (cm)")
+    ax.grid(True, which='both', linestyle='--', alpha=0.3)
+    ax.legend(loc='upper right')
+    
+    # 日付表示
+    ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d'))
+    ax.set_xlim(df['raw_time'].iloc[0], df['raw_time'].iloc[-1])
+    
+    st.pyplot(fig)
