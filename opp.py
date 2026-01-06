@@ -189,10 +189,10 @@ else:
         
         mid_time = start_t + (duration / 2)
         
-        # 終了時間よりさらに下に配置 (緑文字と被らないように)
-        y_pos_dur = y_pos_end - 15 
+        # 【修正】 緑文字(End)よりさらに大きく距離を取る (前回比 -15 -> -30)
+        y_pos_dur = y_pos_end - 30 
 
-        # ax.text で配置 (シンプル化)
+        # ax.text で配置
         ax.text(
             mid_time, y_pos_dur, dur_str, 
             ha='center', va='top', 
