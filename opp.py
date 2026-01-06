@@ -13,27 +13,42 @@ import re
 st.set_page_config(layout="wide")
 
 # ---------------------------------------------------------
-# 計算ロジック
+# 計算ロジック (広島港ベースに最適化)
 # ---------------------------------------------------------
 class OnishiTideCalculator:
     def __init__(self):
-        self.CORRECTION_RATIO = 1.0
-        self.TIME_OFFSET_MINUTES = 0
-        self.MSL = 250.0 
+        # 【分析結果に基づく設定】
+        # 大西港は広島港(宇品)の波が約10分遅れて到達する場所に位置します。
+        # 竹原ベースだと-30分の補正が必要ですが、広島ベースなら+10分で精度が高まります。
+        
+        # 基準港: 広島(宇品)の調和定数 (気象庁データ準拠)
         self.CONSTITUENTS = {
-            'M2': {'amp': 130.0, 'phase': 200.0, 'speed': 28.9841042},
-            'S2': {'amp': 50.0,  'phase': 230.0, 'speed': 30.0000000},
-            'K1': {'amp': 35.0,  'phase': 180.0, 'speed': 15.0410686},
-            'O1': {'amp': 30.0,  'phase': 160.0, 'speed': 13.9430356}
+            'M2': {'amp': 132.0, 'phase': 206.5, 'speed': 28.9841042},
+            'S2': {'amp': 48.0,  'phase': 242.6, 'speed': 30.0000000},
+            'K1': {'amp': 37.0,  'phase': 191.0, 'speed': 15.0410686},
+            'O1': {'amp': 30.0,  'phase': 172.6, 'speed': 13.9430356}
         }
+        
+        # 大西港フェリーターミナル向け補正
+        # 平均水面(MSL): 潮割データ(満潮~350, 干潮~0)の中間値から180.0cmと推定
+        self.MSL = 180.0 
+        
+        # 時間ズレ: 広島(11:20) -> 大西(11:30頃) = +10分 (遅れる)
+        self.TIME_OFFSET_MINUTES = 10 
+        
+        # 潮位比率: 広島(360cm) -> 大西(350cm) = 0.98倍
+        self.CORRECTION_RATIO = 0.98
 
     def _calculate_astronomical_tide(self, target_datetime):
+        # 天文潮位の推算
         base_date = datetime.datetime(target_datetime.year, 1, 1)
         delta_hours = (target_datetime - base_date).total_seconds() / 3600.0
+        
         tide_height = self.MSL
         for name, const in self.CONSTITUENTS.items():
             theta = math.radians(const['speed'] * delta_hours - const['phase'])
             tide_height += const['amp'] * math.cos(theta)
+            
         return tide_height
 
     def get_period_data(self, year, month, start_day, end_day, interval_minutes=5):
@@ -48,7 +63,11 @@ class OnishiTideCalculator:
 
         current_dt = start_dt
         while current_dt <= end_dt:
+            # 補正計算: 指定時刻に対応する「基準港の潮位」を計算
+            # calc_time = 現在時刻 - オフセット
+            # 例: 大西11:30の潮位を知りたい → 広島11:20の潮位を参照
             calc_time_offset = current_dt - datetime.timedelta(minutes=self.TIME_OFFSET_MINUTES)
+            
             base_level = self._calculate_astronomical_tide(calc_time_offset)
             onishi_level = base_level * self.CORRECTION_RATIO
             
@@ -64,17 +83,16 @@ class OnishiTideCalculator:
 # メイン画面構成
 # ---------------------------------------------------------
 st.title("大西港 潮位ビジュアライザー")
+st.caption("データ参照元: 広島港基準 + 大西港補正 (潮割データ準拠)")
 
-# --- 設定エリア（タイトルの下に配置） ---
+# --- 設定エリア ---
 st.markdown("### 条件設定")
 
-# 1行目: 年、期間
 col1, col2 = st.columns(2)
 with col1:
     year_sel = st.number_input("対象年", value=datetime.date.today().year)
 
 with col2:
-    # 期間選択リスト
     period_options = []
     for m in range(1, 13):
         period_options.append(f"{m}月前半 (1日-15日)")
@@ -89,13 +107,12 @@ with col2:
         index=default_index
     )
 
-# 2行目: 潮位、時間帯
 col3, col4 = st.columns(2)
 with col3:
+    # 潮位デフォルト: 120cm
     target_cm = st.number_input("基準潮位 (cm)", value=120, step=10, help="この高さより低い時間を探します")
 
 with col4:
-    # 時間スライダー (0-24)
     start_hour, end_hour = st.slider(
         "活動時間 (この時間内のみ抽出)",
         0, 24, (7, 23),
@@ -124,7 +141,7 @@ data = calculator.get_period_data(year_sel, month_sel, start_d, end_d)
 df = pd.DataFrame(data)
 
 if df.empty:
-    st.error("データがありません。設定を確認してください。")
+    st.error("データがありません。")
 else:
     # ---------------------------------------------------------
     # グラフ描画
@@ -133,29 +150,22 @@ else:
 
     fig, ax = plt.subplots(figsize=(15, 8))
 
-    # 1. 潮位線 (全時間表示)
+    # 1. 潮位線
     ax.plot(df['raw_time'], df['Level_cm'], color='#1f77b4', linewidth=1.5, alpha=0.8, label="Tide Level")
 
     # 2. 基準線
     ax.axhline(y=target_cm, color='black', linestyle='--', linewidth=1, label=f"Target ({target_cm}cm)")
 
-    # 3. 塗りつぶし & 判定ロジック (時刻修正版)
+    # 3. 塗りつぶし (時刻判定厳密化: end_hour未満)
     hours = df['raw_time'].dt.hour
-    
-    # 【修正ポイント】
-    # start_hour以上、かつ end_hour "未満" に設定
-    # 例: 7〜23の場合 -> 7:00は含む(>=7), 23:00になったら終了(<23)
-    # ※ end_hourが24の場合は「日の終わりまで」なので全ての時間(<24)でOK
     is_time_ok = (hours >= start_hour) & (hours < end_hour)
-    
     is_level_ok = (df['Level_cm'] <= target_cm)
     
-    # 条件に合う場所を赤く塗る
     ax.fill_between(df['raw_time'], df['Level_cm'], target_cm, 
                     where=(is_level_ok & is_time_ok), 
                     color='red', alpha=0.3, interpolate=True)
 
-    # 4. 時間ラベルと継続時間
+    # 4. ラベル表示
     df['in_target'] = is_level_ok & is_time_ok
     df['change'] = df['in_target'].ne(df['in_target'].shift()).cumsum()
     groups = df[df['in_target']].groupby('change')
@@ -169,13 +179,12 @@ else:
         duration = end_t - start_t
         total_minutes = int(duration.total_seconds() / 60)
         
-        # 10分未満は表示しない
         if total_minutes < 10: continue
 
         y_offset = 20 + (label_offset_counter % 2) * 25
         label_offset_counter += 1
 
-        # Start Time
+        # Start
         ax.annotate(
             start_t.strftime("%H:%M"), 
             xy=(start_t, target_cm), 
@@ -184,7 +193,7 @@ else:
             arrowprops=dict(arrowstyle='->', color='blue', linewidth=0.5)
         )
 
-        # End Time
+        # End
         ax.annotate(
             end_t.strftime("%H:%M"), 
             xy=(end_t, target_cm), 
@@ -193,7 +202,7 @@ else:
             arrowprops=dict(arrowstyle='->', color='blue', linewidth=0.5)
         )
 
-        # Duration (1h 20m)
+        # Duration
         hours_dur = total_minutes // 60
         mins_dur = total_minutes % 60
         dur_str = f"{hours_dur}h {mins_dur}m"
@@ -202,7 +211,7 @@ else:
         ax.text(mid_time, target_cm - 15, dur_str, 
                 ha='center', va='top', fontsize=9, fontweight='bold', color='#cc0000')
 
-    # 5. レイアウト設定
+    # レイアウト
     ax.set_ylabel("Level (cm)")
     ax.grid(True, which='both', linestyle='--', alpha=0.3)
     ax.legend(loc='upper right')
