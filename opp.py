@@ -93,10 +93,10 @@ with st.sidebar:
 # --- 計算実行 ---
 model = HarmonicTideModel()
 
-# 現在の潮位を取得 (表示用に先に計算)
+# 現在の潮位を取得
 curr_time, curr_lvl = model.get_current_level()
 
-# --- ナビゲーション & 現在状況表示 (Periodの下に配置) ---
+# --- ナビゲーション & 現在状況表示 ---
 col_n1, col_n2, col_n3 = st.columns([1, 4, 1])
 days_to_show = 10
 
@@ -108,9 +108,7 @@ with col_n3:
         st.session_state['view_date'] += datetime.timedelta(days=days_to_show)
 
 with col_n2:
-    # 期間表示
     st.markdown(f"<h4 style='text-align: center; margin-bottom: 0px;'>Period: {st.session_state['view_date'].strftime('%Y/%m/%d')} - </h4>", unsafe_allow_html=True)
-    # ★ここに現在潮位を表示 (グラフの外、Periodの下)
     st.markdown(f"<h3 style='text-align: center; color: #0066cc; margin-top: 0px;'>Current: {curr_time.strftime('%H:%M')} | Level: {int(curr_lvl)}cm</h3>", unsafe_allow_html=True)
 
 # --- データ生成 ---
@@ -160,12 +158,13 @@ ax.plot(df['time'], df['level'], color='#0066cc', linewidth=2, label="Level", zo
 ax.axhline(y=target_cm, color='orange', linestyle='--', linewidth=2, label=f"Limit {target_cm}cm", zorder=1)
 ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4, label="Workable")
 
-# 1. 現在位置 (黄色い丸のみ、文字はグラフ外へ移動済み)
+# 1. 現在位置 (黄色い丸) - サイズを半分の90に変更
 graph_start = df['time'].iloc[0]
 graph_end = df['time'].iloc[-1]
 
 if graph_start <= curr_time <= graph_end:
-    ax.scatter(curr_time, curr_lvl, color='gold', edgecolors='black', s=180, zorder=10)
+    # s=180 -> s=90 に変更
+    ax.scatter(curr_time, curr_lvl, color='gold', edgecolors='black', s=90, zorder=10)
 
 # 2. ピーク (High/Low)
 levels = df['level'].values
@@ -187,12 +186,12 @@ for i in range(1, len(levels)-1):
         ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
                     textcoords='offset points', ha='center', fontsize=9, color='#0000cc', fontweight='bold')
 
-# 3. 作業時間 (Work)
+# 3. 作業時間 (Work) - 表示位置をさらに下へ
 for win in safe_windows:
     x = win['min_time']
     y = win['min_level']
-    # 干潮の下に短縮表記で表示
-    ax.annotate(win['graph_label'], (x, y), xytext=(0, -65), 
+    # xytextを -65 から -85 に変更してさらに下へ
+    ax.annotate(win['graph_label'], (x, y), xytext=(0, -85), 
                 textcoords='offset points', ha='center', fontsize=9, 
                 color='#b8860b', fontweight='bold',
                 bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
@@ -202,7 +201,8 @@ ax.set_ylabel("Level (cm)")
 ax.grid(True, linestyle=':', alpha=0.6)
 ax.xaxis.set_major_locator(mdates.DayLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-ax.set_ylim(bottom=-80)
+# 下の余白を広げるために bottom を -110 に変更
+ax.set_ylim(bottom=-110)
 
 plt.tight_layout()
 st.pyplot(fig)
