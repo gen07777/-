@@ -16,28 +16,18 @@ st.set_page_config(layout="wide", page_title="大西港 潮汐アプリ")
 # ---------------------------------------------------------
 def configure_font():
     """
-    環境に存在する日本語フォントを探してMatplotlibに設定する。
+    Matplotlibで日本語を表示するための強力なフォント設定。
+    複数のフォントを優先順位付きで指定し、環境にあるものを自動選択させる。
     """
-    target_fonts = [
-        'Meiryo', 'Yu Gothic', 'HiraKakuProN-W3', 
-        'Hiragino Sans', 'TakaoGothic', 'IPAGothic', 
-        'Noto Sans CJK JP', 'IPAexGothic', 'Arial Unicode MS'
+    # 日本語を表示できる可能性のあるフォントリスト（優先順位順）
+    fonts = [
+        'Noto Sans CJK JP', 'Meiryo', 'Yu Gothic', 
+        'Hiragino Sans', 'HiraKakuProN-W3', 
+        'TakaoGothic', 'IPAGothic', 'IPAexGothic', 
+        'Arial Unicode MS', 'sans-serif' # 最後の砦
     ]
-    
-    # システムのフォントを全走査
-    font_list = font_manager.findSystemFonts(fontpaths=None, fontext='ttf')
-    
-    for target in target_fonts:
-        for path in font_list:
-            if target.lower() in path.lower():
-                try:
-                    font_manager.fontManager.addfont(path)
-                    prop = font_manager.FontProperties(fname=path)
-                    plt.rcParams['font.family'] = prop.get_name()
-                    return
-                except:
-                    continue
-    plt.rcParams['font.family'] = 'sans-serif'
+    # rcParamsにリストで設定することで、Matplotlibが利用可能なフォントを順に試す
+    plt.rcParams['font.family'] = fonts
 
 configure_font()
 
@@ -92,22 +82,22 @@ class FixedKureTideModel:
         return pd.DataFrame(data)
 
     def get_current_level(self):
-        # ★ここを修正 (タイムゾーン情報を削除してNaiveにする)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         now_jst = now_utc + datetime.timedelta(hours=9)
-        now_naive = now_jst.replace(tzinfo=None) 
+        now_naive = now_jst.replace(tzinfo=None)
         return now_naive, self._calc_raw(now_naive)
 
 # ---------------------------------------------------------
 # メイン画面 UI
 # ---------------------------------------------------------
-st.title("⚓ 大西港") 
+st.title("⚓ 大西港")
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
 
 # --- サイドバー設定 ---
 with st.sidebar:
     st.header("⚙️ 作業条件設定")
     
+    # 条件設定
     target_cm = st.number_input("作業基準潮位 (cm)", value=120, step=10, help="これ以下なら作業可能")
     start_h, end_h = st.slider("作業可能時間帯", 0, 24, (7, 23), format="%d時")
     
@@ -151,8 +141,10 @@ if df['is_safe'].any():
         start_t = grp['time'].iloc[0]
         end_t = grp['time'].iloc[-1]
         
+        # 10分以上
         if (end_t - start_t).total_seconds() >= 600:
             min_lvl = grp['level'].min()
+            # 干潮時刻を取得
             min_time = grp.loc[grp['level'].idxmin(), 'time']
             
             # 作業時間を計算
@@ -162,7 +154,6 @@ if df['is_safe'].any():
             dur_str = f"{hours}時間{minutes:02}分"
             
             safe_windows.append({
-                "date_obj": start_t.date(),
                 "date_str": start_t.strftime('%m/%d (%a)'),
                 "start": start_t.strftime("%H:%M"),
                 "end": end_t.strftime("%H:%M"),
@@ -183,40 +174,48 @@ ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='
 
 # --- 1. 現在位置の表示 (黄色い点) ---
 curr_time, curr_lvl = model.get_current_level()
-# 表示期間内であればプロット
 graph_start = df['time'].iloc[0]
 graph_end = df['time'].iloc[-1]
 if graph_start <= curr_time <= graph_end:
     ax.scatter(curr_time, curr_lvl, color='gold', edgecolors='black', s=150, zorder=10, label="現在")
+    # 文字化け対策済みフォントで描画
     ax.annotate("現在", (curr_time, curr_lvl), xytext=(0, 20), 
                 textcoords='offset points', ha='center', fontsize=10, fontweight='bold',
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gold", alpha=0.9))
 
-# --- 2. 満潮ピークの表示 (時刻・潮位) ---
+# --- 2. ピークの表示 (満潮・干潮) ---
 levels = df['level'].values
 times = df['time'].tolist()
 for i in range(1, len(levels)-1):
-    if levels[i-1] < levels[i] and levels[i] > levels[i+1]:
-        if levels[i] > 180: # 満潮
-            t, l = times[i], levels[i]
-            ax.scatter(t, l, color='red', marker='^', s=40, zorder=3)
-            off_y = 15 if (t.day % 2 == 0) else 30
-            ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
-                        textcoords='offset points', ha='center', fontsize=9, color='#cc0000', fontweight='bold')
+    t, l = times[i], levels[i]
+    
+    # 満潮プロット (MSLより上)
+    if levels[i-1] < l and l > levels[i+1] and l > 180:
+        ax.scatter(t, l, color='red', marker='^', s=40, zorder=3)
+        off_y = 15 if (t.day % 2 == 0) else 30
+        ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
+                    textcoords='offset points', ha='center', fontsize=9, color='#cc0000', fontweight='bold')
+
+    # 干潮プロット (MSLより下) - 時刻を追加して復活
+    if levels[i-1] > l and l < levels[i+1] and l < 180:
+        ax.scatter(t, l, color='blue', marker='v', s=40, zorder=3)
+        off_y = -25 if (t.day % 2 == 0) else -40
+        # 【修正】時刻と潮位を表示
+        label = f"{t.strftime('%H:%M')}\n{int(l)}"
+        ax.annotate(label, (t, l), xytext=(0, off_y), 
+                    textcoords='offset points', ha='center', fontsize=9, color='#0000cc', fontweight='bold')
 
 # --- 3. 作業時間の表示 (干潮の下に黄色文字) ---
 for win in safe_windows:
     x_pos = win['min_time']
     y_pos = win['min_level']
     
-    # 干潮マーカー
-    ax.scatter(x_pos, y_pos, color='blue', marker='v', s=40, zorder=3)
-    
-    # 作業時間テキスト (濃いゴールド色)
+    # 作業時間テキスト (文字化け対策済み)
     label = win['duration']
-    ax.annotate(label, (x_pos, y_pos), xytext=(0, -25), 
+    # 干潮ラベルと重ならないよう、さらに下に表示
+    ax.annotate(label, (x_pos, y_pos), xytext=(0, -55), 
                 textcoords='offset points', ha='center', fontsize=10, 
-                color='#b8860b', fontweight='bold', # Dark Goldenrod
+                color='#b8860b', fontweight='bold',
                 bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
 
 # 軸設定
@@ -224,7 +223,7 @@ ax.set_ylabel("潮位 (cm)")
 ax.grid(True, linestyle=':', alpha=0.6)
 ax.xaxis.set_major_locator(mdates.DayLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-ax.set_ylim(bottom=-30) 
+ax.set_ylim(bottom=-60) # 作業時間表示のために下限を広げる
 
 plt.tight_layout()
 st.pyplot(fig)
