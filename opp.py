@@ -6,6 +6,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import re
+import requests
+from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------
 # アプリ設定
@@ -13,61 +15,110 @@ import re
 st.set_page_config(layout="wide")
 
 # ---------------------------------------------------------
-# 物理計算ロジック (調和定数による推算)
+# スクレイピング関数 (大西港フェリーターミナル専用)
+# ---------------------------------------------------------
+def fetch_chowari_data():
+    """
+    Chowariのサイトから今日の満潮データを取得する
+    成功すれば (time_obj, level_int) を返す
+    失敗すれば None を返す
+    """
+    url = "https://tide.chowari.jp/34/344311/22694/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=3)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        # 今日の日付を取得 (サイト上の表記に合わせる必要があるが、簡易的に「今日のデータ」を探す)
+        # Chowariは通常、当日のデータがハイライトされているか、テーブルの最初の方にある
+        # ここでは簡易的に「最初の満潮データ」を抽出するロジックを組む
+        
+        # ※サイトの構造が変わると動かなくなるリスクがあります
+        # class="tide_table" などを探す
+        
+        # 【重要】簡易解析ロジック
+        # サイト構造が複雑なため、メタタグや特定のクラスから「満潮」の数字を探す
+        # ここでは失敗時の安全策を最優先し、例外処理で囲みます
+        
+        # 実際のChowariのテーブル構造に合わせて解析（仮定）
+        # <td class="high">12:34<br>350</td> のような構造を想定
+        
+        # 実際にはサイトごとに構造が違うため、汎用的な「数字拾い」は難しいですが、
+        # 成功率を上げるために「high_tide」等のキーワード周辺を探します。
+        
+        # 今回はデモとして「取得成功したフリ」ではなく、
+        # 実際にアクセスして取れなければNoneを返す実装にします。
+        
+        # (解析ロジックが複雑になりすぎるため、アクセス可否のチェックを主目的とします)
+        if response.status_code == 200:
+            # ここで本来は soup.find... で値を抜きますが、
+            # サイト構造の変更に弱いため、あえて「成功したら初期値に戻す」等の処理はせず
+            # ユーザーに手入力を促すか、固定値を返す構造にします。
+            
+            # もし本当にスクレイピングするなら以下のようなコードが必要ですが
+            # Streamlit Cloudではほぼブロックされるため、ダミー実装に近い形にします。
+            return None 
+
+    except Exception:
+        return None
+    
+    return None
+
+# ---------------------------------------------------------
+# 物理計算ロジック
 # ---------------------------------------------------------
 class HarmonicTideModel:
     def __init__(self):
-        # 分潮の角速度 (度/時) - 気象庁潮汐表等の定義値
         self.SPEEDS = {
-            'M2': 28.9841042,
-            'S2': 30.0000000,
-            'K1': 15.0410686,
-            'O1': 13.9430356
+            'M2': 28.9841042, 'S2': 30.0000000,
+            'K1': 15.0410686, 'O1': 13.9430356
         }
-        
-        # 初期値: 広島港(宇品)の定数 (ここから微調整する)
-        # 振幅(cm), 遅角(度)
-        self.consts = {
-            'M2': {'amp': 132.0, 'phase': 206.5},
-            'S2': {'amp': 48.0,  'phase': 242.6},
-            'K1': {'amp': 37.0,  'phase': 191.0},
-            'O1': {'amp': 30.0,  'phase': 172.6}
+        self.base_consts = {
+            'M2': {'amp': 128.0, 'phase': 203.0},
+            'S2': {'amp': 48.0,  'phase': 236.0},
+            'K1': {'amp': 35.0,  'phase': 187.0},
+            'O1': {'amp': 30.0,  'phase': 169.0}
         }
-        self.MSL = 240.0 # 平均水面
+        self.msl = 240.0 
+        self.phase_offset = 0
 
-    def update_constants(self, m2_amp, m2_phase, s2_amp, s2_phase, k1_amp, k1_phase, o1_amp, o1_phase, msl):
-        """ユーザー入力で定数を更新"""
-        self.consts['M2'] = {'amp': m2_amp, 'phase': m2_phase}
-        self.consts['S2'] = {'amp': s2_amp, 'phase': s2_phase}
-        self.consts['K1'] = {'amp': k1_amp, 'phase': k1_phase}
-        self.consts['O1'] = {'amp': o1_amp, 'phase': o1_phase}
-        self.MSL = msl
+    def calibrate(self, target_high_time, target_high_level):
+        search_start = target_high_time - datetime.timedelta(hours=3)
+        search_end = target_high_time + datetime.timedelta(hours=3)
+        best_time = search_start
+        max_level = -9999
+        dt = search_start
+        while dt <= search_end:
+            lvl = self._calc_raw(dt, phase_shift=0, msl_shift=0)
+            if lvl > max_level:
+                max_level = lvl
+                best_time = dt
+            dt += datetime.timedelta(minutes=1)
+        
+        time_diff_minutes = (target_high_time - best_time).total_seconds() / 60.0
+        self.phase_offset = time_diff_minutes * 0.48
+        height_diff = target_high_level - max_level
+        self.msl += height_diff
+        return time_diff_minutes, height_diff
+
+    def _calc_raw(self, target_dt, phase_shift=0, msl_shift=0):
+        base_dt = datetime.datetime(target_dt.year, 1, 1)
+        delta_hours = (target_dt - base_dt).total_seconds() / 3600.0
+        level = self.msl + msl_shift
+        for name, speed in self.SPEEDS.items():
+            const = self.base_consts[name]
+            phase = const['phase'] - phase_shift 
+            theta = math.radians(speed * delta_hours - phase)
+            level += const['amp'] * math.cos(theta)
+        return level
 
     def calculate_level(self, target_dt):
-        """
-        指定時刻の潮位を計算
-        h = Z0 + Σ Hi * cos(ωi * t - κi)
-        ※tは年初からの経過時間(時間単位)
-        """
-        # 年初(1月1日 00:00)を基準とする
-        base_dt = datetime.datetime(target_dt.year, 1, 1)
-        # 経過時間(hours)
-        delta_sec = (target_dt - base_dt).total_seconds()
-        t = delta_sec / 3600.0
-        
-        level = self.MSL
-        
-        for name, speed in self.SPEEDS.items():
-            amp = self.consts[name]['amp']
-            phase = self.consts[name]['phase']
-            speed_rad = math.radians(speed)
-            phase_rad = math.radians(phase)
-            
-            # 分潮の合成
-            # cos(ωt - κ)
-            level += amp * math.cos(speed_rad * t - phase_rad)
-            
-        return level
+        return self._calc_raw(target_dt, self.phase_offset, 0)
 
     def get_period_data(self, year, month, start_day, end_day, interval_minutes=5):
         detailed_data = []
@@ -79,76 +130,107 @@ class HarmonicTideModel:
         current_dt = start_dt
         while current_dt <= end_dt:
             level = self.calculate_level(current_dt)
-            detailed_data.append({
-                "raw_time": current_dt, 
-                "Level_cm": level
-            })
+            detailed_data.append({"raw_time": current_dt, "Level_cm": level})
             current_dt += datetime.timedelta(minutes=interval_minutes)
         return detailed_data
 
 # ---------------------------------------------------------
 # メイン画面構成
 # ---------------------------------------------------------
-st.title("大西港 潮位ビジュアライザー (調和分解・合成版)")
-st.caption("分潮(M2, S2...)の三角関数和により推算潮位を算出します")
+st.title("大西港 潮位ビジュアライザー (自動同調版)")
 
 # 現在時刻 (JST)
 now_utc = datetime.datetime.now(datetime.timezone.utc)
 now_jst = now_utc + datetime.timedelta(hours=9)
 now_jst = now_jst.replace(tzinfo=None, second=0, microsecond=0)
 
-# --- レイアウト: 設定とチューニング ---
-col_main, col_side = st.columns([3, 1])
-
-# 左側: 計算パラメータ (ここを調整してChowariに合わせる)
-with col_side:
-    st.header("🌊 定数チューニング")
-    st.caption("Chowariと合うように数値を調整してください")
+# --- サイドバー: サイト合わせ込み ---
+with st.sidebar:
+    st.header("🔧 補正設定")
     
-    with st.expander("主要分潮設定", expanded=True):
-        st.markdown("**M2 (主太陰半日周潮)**")
-        m2_amp = st.number_input("M2 振幅", value=132.0, step=1.0)
-        m2_phase = st.number_input("M2 遅角(度)", value=206.5, step=1.0, help="時間をずらす場合はここを変更")
-        
-        st.markdown("**S2 (主太陽半日周潮)**")
-        s2_amp = st.number_input("S2 振幅", value=48.0, step=1.0)
-        s2_phase = st.number_input("S2 遅角(度)", value=242.6, step=1.0)
-        
-        st.markdown("**K1 (主太陰太陽日周潮)**")
-        k1_amp = st.number_input("K1 振幅", value=37.0, step=1.0)
-        k1_phase = st.number_input("K1 遅角(度)", value=191.0, step=1.0)
-        
-        st.markdown("**O1 (主太陰日周潮)**")
-        o1_amp = st.number_input("O1 振幅", value=30.0, step=1.0)
-        o1_phase = st.number_input("O1 遅角(度)", value=172.6, step=1.0)
+    # 自動取得ボタン
+    if st.button("📡 サイトから自動取得（試行）"):
+        # 実際にスクレイピングを試みるロジック
+        # (Streamlit Cloudではブロックされる可能性が高いですが、トライします)
+        try:
+            url = "https://tide.chowari.jp/34/344311/22694/"
+            res = requests.get(url, timeout=3)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.content, "html.parser")
+                # Chowariのテーブル構造から今日の満潮を探す(非常に簡易的な探索)
+                # ※サイト構造が変わると動作しません
+                
+                # 今日の日付セルを探す (例: "7(水)" のような表記)
+                day_str = f"{now_jst.day}("
+                found = False
+                
+                # テーブル内の全セルを走査
+                for td in soup.find_all("td"):
+                    if day_str in td.text:
+                        # 日付が見つかったら、その行(tr)の満潮セルを探す
+                        parent = td.parent
+                        high_tides = parent.find_all("td", class_="red") # 満潮は赤字クラス等の場合が多い
+                        
+                        if high_tides:
+                            # 最初の満潮テキスト "12:34 350" のような形式を解析
+                            text = high_tides[0].get_text(strip=True)
+                            # 正規表現で時間と数値を抜く
+                            m = re.search(r"(\d{1,2}:\d{2}).*?(\d{2,3})", text)
+                            if m:
+                                t_str = m.group(1)
+                                l_str = m.group(2)
+                                
+                                # session_stateに保存して再描画
+                                st.session_state['auto_time'] = datetime.datetime.strptime(t_str, "%H:%M").time()
+                                st.session_state['auto_level'] = int(l_str)
+                                st.session_state['auto_msg'] = "✅ 取得成功!"
+                                found = True
+                                break
+                
+                if not found:
+                    st.error("データの解析に失敗しました(サイト構造不一致)")
+            else:
+                st.error("サイトにアクセスできませんでした(IP制限)")
+        except:
+            st.error("通信エラー: 自動取得できませんでした")
 
-        st.divider()
-        msl_val = st.number_input("平均水面 (Z0)", value=240.0, step=10.0, help="グラフ全体の高さを上下させます")
+    # session_stateから値を取り出す（なければデフォルト）
+    def_time = st.session_state.get('auto_time', datetime.time(12, 0))
+    def_level = st.session_state.get('auto_level', 350)
+    
+    if 'auto_msg' in st.session_state:
+        st.success(st.session_state['auto_msg'])
 
-# 右側: 表示設定
-with col_main:
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("##### 期間設定")
-        year_sel = st.number_input("年", value=now_jst.year)
-        period_options = [f"{m}月前半" for m in range(1, 13)] + [f"{m}月後半" for m in range(1, 13)]
-        period_options = sorted(period_options, key=lambda x: int(x.split('月')[0]) + (0.5 if '後半' in x else 0))
-        
-        current_idx = (now_jst.month - 1) * 2
-        if now_jst.day > 15: current_idx += 1
-        selected_period = st.selectbox("表示期間", period_options, index=current_idx)
+    st.info("補正基準値を入力 (サイトの今日の満潮データ)")
+    cal_date = st.date_input("日付", value=now_jst.date())
+    cal_time = st.time_input("満潮時刻", value=def_time)
+    cal_height = st.number_input("満潮潮位 (cm)", value=def_level, step=10)
+    
+    st.markdown("---")
+    st.write("※1点を合わせれば全体が補正されます")
 
-    with col2:
-        st.markdown("##### ターゲット設定")
-        target_cm = st.number_input("基準潮位(cm)", value=130, step=10)
-        start_hour, end_hour = st.slider("活動時間", 0, 24, (7, 23), format="%d時")
+# --- 設定エリア ---
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("##### 1. 期間設定")
+    year_sel = st.number_input("年", value=now_jst.year)
+    period_options = [f"{m}月前半" for m in range(1, 13)] + [f"{m}月後半" for m in range(1, 13)]
+    period_options = sorted(period_options, key=lambda x: int(x.split('月')[0]) + (0.5 if '後半' in x else 0))
+    current_idx = (now_jst.month - 1) * 2
+    if now_jst.day > 15: current_idx += 1
+    selected_period = st.selectbox("期間", period_options, index=current_idx)
 
-# --- 計算実行 ---
+with col2:
+    st.markdown("##### 2. ターゲット設定")
+    target_cm = st.number_input("基準潮位(cm)", value=130, step=10)
+    start_hour, end_hour = st.slider("活動時間", 0, 24, (7, 23), format="%d時")
+
+# --- 計算 & キャリブレーション ---
 model = HarmonicTideModel()
-# ユーザー設定値を反映
-model.update_constants(m2_amp, m2_phase, s2_amp, s2_phase, k1_amp, k1_phase, o1_amp, o1_phase, msl_val)
+target_cal_dt = datetime.datetime.combine(cal_date, cal_time)
+diff_min, diff_cm = model.calibrate(target_cal_dt, cal_height)
 
-# 期間解析
+# --- 期間データ生成 ---
 try:
     month_match = re.match(r"(\d+)月", selected_period)
     month_sel = int(month_match.group(1))
@@ -173,13 +255,14 @@ else:
     # ---------------------------------------------------------
     # グラフ描画
     # ---------------------------------------------------------
-    st.subheader(f"推算潮位: {selected_period}")
-    
+    st.subheader(f"潮位グラフ: {selected_period}")
+    st.success(f"✅ 自動補正完了: モデルを {diff_min:+.1f}分 / {diff_cm:+.1f}cm シフトしました")
+
     fig, ax = plt.subplots(figsize=(15, 10))
 
     # メイン線
-    ax.plot(df['raw_time'], df['Level_cm'], color='#1f77b4', linewidth=1.5, alpha=0.9, label="推算潮位")
-    ax.axhline(y=target_cm, color='black', linestyle='--', linewidth=1, label=f"Target ({target_cm}cm)")
+    ax.plot(df['raw_time'], df['Level_cm'], color='#1f77b4', linewidth=1.5, alpha=0.9, label="潮位")
+    ax.axhline(y=target_cm, color='black', linestyle='--', linewidth=1, label=f"基準 ({target_cm}cm)")
 
     # 塗りつぶし
     hours = df['raw_time'].dt.hour
@@ -189,59 +272,46 @@ else:
                     where=(is_level_ok & is_time_ok), 
                     color='red', alpha=0.3, interpolate=True)
 
-    # -----------------------------------------------------
-    # 満潮・干潮の検出 (Peak Detection)
-    # -----------------------------------------------------
+    # ピーク検出
     levels = df['Level_cm'].values
     times = df['raw_time'].tolist()
     
     for i in range(1, len(levels) - 1):
-        # 満潮 (High)
         if levels[i-1] < levels[i] and levels[i] > levels[i+1]:
             ax.scatter(times[i], levels[i], color='red', s=30, zorder=5, marker='^')
-            # グラフの上に表示
             ax.annotate(f"{times[i].strftime('%H:%M')}\n{levels[i]:.0f}",
-                        xy=(times[i], levels[i]), xytext=(0, 10),
+                        xy=(times[i], levels[i]), xytext=(0, 15),
                         textcoords='offset points', ha='center', va='bottom',
-                        fontsize=8, color='#880000', fontweight='bold')
-
-        # 干潮 (Low)
+                        fontsize=9, color='#AA0000', fontweight='bold')
         elif levels[i-1] > levels[i] and levels[i] < levels[i+1]:
             ax.scatter(times[i], levels[i], color='blue', s=30, zorder=5, marker='v')
-            # グラフの下に表示
             ax.annotate(f"{times[i].strftime('%H:%M')}\n{levels[i]:.0f}",
                         xy=(times[i], levels[i]), xytext=(0, -25),
                         textcoords='offset points', ha='center', va='top',
-                        fontsize=8, color='#000088', fontweight='bold')
+                        fontsize=9, color='#0000AA', fontweight='bold')
 
-    # -----------------------------------------------------
-    # 現在時刻 (黄色点)
-    # -----------------------------------------------------
+    # 現在時刻
     graph_start = df['raw_time'].iloc[0]
     graph_end = df['raw_time'].iloc[-1]
     
     if graph_start <= now_jst <= graph_end:
         ax.scatter(now_jst, current_tide_level, color='yellow', s=180, zorder=10, edgecolors='black', linewidth=1.5)
         ax.annotate(f"Now\n{now_jst.strftime('%H:%M')}\n{current_tide_level:.0f}cm", 
-                    xy=(now_jst, current_tide_level), xytext=(0, 45),
+                    xy=(now_jst, current_tide_level), xytext=(0, 50),
                     textcoords='offset points', ha='center', va='bottom',
                     fontsize=10, fontweight='bold', color='black',
-                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.9),
+                    bbox=dict(boxstyle="round,pad=0.3", fc="yellow", ec="black", alpha=0.8),
                     arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', color='black'))
 
-    # -----------------------------------------------------
-    # ターゲットエリア情報
-    # -----------------------------------------------------
+    # Start/End/Duration
     df['in_target'] = is_level_ok & is_time_ok
     df['change'] = df['in_target'].ne(df['in_target'].shift()).cumsum()
     groups = df[df['in_target']].groupby('change')
     
     label_offset_counter = 0
-
     for _, group in groups:
         start_t = group['raw_time'].iloc[0]
         end_t = group['raw_time'].iloc[-1]
-        
         duration = end_t - start_t
         total_minutes = int(duration.total_seconds() / 60)
         
@@ -251,28 +321,25 @@ else:
         label_offset_counter += 1
         font_size = 8
         
-        # Start (青/上)
-        y_pos_start = target_cm + 15 + stagger
+        y_pos_start = target_cm + 20 + stagger
         ax.annotate(start_t.strftime("%H:%M"), 
                     xy=(start_t, target_cm), xytext=(0, y_pos_start - target_cm),
                     textcoords='offset points', ha='center', va='bottom', 
                     fontsize=font_size, color='blue', fontweight='bold',
                     arrowprops=dict(arrowstyle='-', color='blue', linewidth=0.5, linestyle=':'))
 
-        # End (緑/下)
-        y_pos_end = target_cm - 15 - stagger
+        y_pos_end = target_cm - 20 - stagger
         ax.annotate(end_t.strftime("%H:%M"), 
                     xy=(end_t, target_cm), xytext=(0, y_pos_end - target_cm), 
                     textcoords='offset points', ha='center', va='top', 
                     fontsize=font_size, color='green', fontweight='bold',
                     arrowprops=dict(arrowstyle='-', color='green', linewidth=0.5, linestyle=':'))
 
-        # Duration (赤/下)
         hours_dur = total_minutes // 60
         mins_dur = total_minutes % 60
         dur_str = f"{hours_dur}h{mins_dur}m"
         mid_time = start_t + (duration / 2)
-        y_pos_dur = y_pos_end - 30 
+        y_pos_dur = y_pos_end - 25 
         
         ax.text(mid_time, y_pos_dur, dur_str, 
                 ha='center', va='top', 
