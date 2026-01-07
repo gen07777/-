@@ -7,86 +7,82 @@ import matplotlib.dates as mdates
 from matplotlib import font_manager
 
 # ---------------------------------------------------------
-# アプリ設定 (必ず一番最初に書く)
+# アプリ設定
 # ---------------------------------------------------------
-st.set_page_config(layout="wide", page_title="大西港 潮汐マスター")
+st.set_page_config(layout="wide", page_title="大西港 潮汐マスター (修正完了版)")
 
 # ---------------------------------------------------------
-# フォント設定 (文字化け対策)
+# フォント設定 (日本語対応)
 # ---------------------------------------------------------
 def set_japanese_font():
-    # Streamlit Cloud (Linux) 環境などで日本語フォントを探す
     possible_fonts = ['Meiryo', 'Yu Gothic', 'HiraKakuProN-W3', 'TakaoGothic', 'IPAGothic', 'Noto Sans CJK JP', 'IPAexGothic']
-    found_font = None
     for f in possible_fonts:
         try:
-            # フォントがあるかチェック
             font_manager.findfont(f, fallback_to_default=False)
-            found_font = f
-            break
+            plt.rcParams['font.family'] = f
+            return
         except:
             continue
-    
-    if found_font:
-        plt.rcParams['font.family'] = found_font
-    else:
-        # フォントがない場合は英語フォントにするが、エラーは出さない
-        plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.family'] = 'sans-serif'
 
 set_japanese_font()
 
 # ---------------------------------------------------------
-# セッション状態管理 (期間の移動用)
+# セッション状態管理 (期間移動用)
 # ---------------------------------------------------------
 if 'view_date' not in st.session_state:
+    # デフォルトで今日を表示
     now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     st.session_state['view_date'] = now_jst.date()
 
 # ---------------------------------------------------------
-# 潮汐計算モデル (呉港データ準拠)
+# 潮汐計算モデル (呉港データ・1/7基準)
 # ---------------------------------------------------------
-class KureTideModel:
-    def __init__(self, input_high_dt, input_high_level):
+class FixedKureTideModel:
+    def __init__(self):
         """
-        修正点: 変数の定義順序を修正しました。
+        1月7日 12:39 満潮 342cm (大西港/呉実績) を基準(Epoch)として、
+        調和分解モデルで将来の潮汐を予測する。
         """
-        # ★ここで先に基準時間をセットする（エラー修正箇所）
-        self.base_time = input_high_dt
+        # 基準日時 (1/7 12:39)
+        self.epoch_time = datetime.datetime(2026, 1, 7, 12, 39)
+        self.epoch_level = 342.0
         
-        # 呉港周辺の潮汐定数 (M2, S2, K1, O1)
+        # 修正: 平均水面(MSL)を180cmに設定 (以前の240cmは高すぎた)
+        self.msl = 180.0
+        
+        # 呉港周辺の主要分潮 (振幅cm, 角速度deg/h)
+        # 位相(phase)は基準時(1/7 12:39)をピーク(0度)と仮定して相対計算
         self.consts = [
-            {'name': 'M2', 'amp': 135.0, 'speed': 28.984},
-            {'name': 'S2', 'amp': 52.0,  'speed': 30.000},
-            {'name': 'K1', 'amp': 40.0,  'speed': 15.041},
-            {'name': 'O1', 'amp': 35.0,  'speed': 13.943}
+            {'name': 'M2', 'amp': 130.0, 'speed': 28.984}, # 主太陰半日周潮
+            {'name': 'S2', 'amp': 50.0,  'speed': 30.000}, # 主太陽半日周潮
+            {'name': 'K1', 'amp': 38.0,  'speed': 15.041}, # 日周潮
+            {'name': 'O1', 'amp': 33.0,  'speed': 13.943}  # 日周潮
         ]
-        self.msl = 240.0 # 平均水面
-        self.height_ratio = 1.0
         
-        # 基準時刻での理論値を計算し、入力値(input_high_level)に合わせて倍率を調整
-        model_val = self._calc_raw(input_high_dt)
+        # 振幅の補正係数を計算
+        # 基準時の理論上の振幅合計
+        total_amp_theory = sum(c['amp'] for c in self.consts)
+        # 実際の振幅 (満潮342 - MSL180 = 162)
+        actual_amp = self.epoch_level - self.msl
         
-        # MSL(240)より高い位置にあるはずなので、その比率で波の高さを補正
-        if model_val > self.msl:
-            # 振幅部分に対する比率を計算
-            theory_amp = model_val - self.msl
-            actual_amp = input_high_level - self.msl
-            if theory_amp > 0:
-                self.height_ratio = actual_amp / theory_amp
-        
-        # 安全策: 極端な値にならないようガード
-        if self.height_ratio <= 0: self.height_ratio = 1.0
+        # 比率を算出 (約0.6〜0.7になるはず)
+        self.scale_factor = actual_amp / total_amp_theory
 
     def _calc_raw(self, target_dt):
         # 基準時からの経過時間(時間)
-        delta_hours = (target_dt - self.base_time).total_seconds() / 3600.0
+        delta_hours = (target_dt - self.epoch_time).total_seconds() / 3600.0
         
+        # ベースは平均水面
         level = self.msl
+        
         for c in self.consts:
-            # 各分潮を合成
-            theta = math.radians(c['speed'] * delta_hours)
-            # 振幅に補正比率を掛ける
-            level += (c['amp'] * self.height_ratio) * math.cos(theta)
+            # 基準時をピーク(cos(0)=1)とするため、経過時間分だけ位相を進める
+            theta_deg = c['speed'] * delta_hours
+            theta_rad = math.radians(theta_deg)
+            
+            # 振幅 × 補正係数 × cos(位相)
+            level += (c['amp'] * self.scale_factor) * math.cos(theta_rad)
             
         return level
 
@@ -106,43 +102,27 @@ class KureTideModel:
 # ---------------------------------------------------------
 # メイン画面 UI
 # ---------------------------------------------------------
-st.title("⚓ 大西港 潮汐マスター (呉港データ準拠)")
+st.title("⚓ 大西港 潮汐マスター (自動計算版)")
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
 
-# --- サイドバー ---
+# --- サイドバー設定 (入力不要化) ---
 with st.sidebar:
-    st.header("1. 基準データ入力")
-    st.caption("画像の表にある「今日の満潮」を入力してください")
+    st.header("⚙️ 設定")
     
-    input_cal_date = st.date_input("日付", value=now_jst.date())
-    
-    # 1/7のデータをデフォルトに
-    col_in1, col_in2 = st.columns(2)
-    with col_in1:
-        ref_time = st.time_input("満潮時刻", value=datetime.time(12, 39))
-    with col_in2:
-        ref_level = st.number_input("満潮潮位", value=342, step=1)
-
-    st.markdown("---")
-    st.header("2. 作業条件設定")
-    
-    # デフォルト: 120cm
-    target_cm = st.number_input("作業基準潮位 (cm)", value=120, step=10, help="これ以下なら作業可能")
-    
-    # デフォルト: 7:00-23:00
+    # 作業条件設定
+    target_cm = st.number_input("作業基準潮位 (cm)", value=120, step=10, help="この高さ以下なら作業可能")
     start_h, end_h = st.slider("作業可能時間帯", 0, 24, (7, 23), format="%d時")
     
     st.markdown("---")
-    st.write("▼ 表示操作")
-    if st.button("今日に戻る"):
+    st.info("※1月7日の実測値を基準に自動計算しています。毎日の入力は不要です。")
+    
+    if st.button("今日の日付に戻る"):
         st.session_state['view_date'] = now_jst.date()
 
 # --- 計算実行 ---
-base_dt = datetime.datetime.combine(input_cal_date, ref_time)
-# ここでエラーが起きないよう修正済み
-model = KureTideModel(base_dt, ref_level)
+model = FixedKureTideModel()
 
-# --- 期間切り替えボタン ---
+# --- 期間切り替え ---
 col_n1, col_n2, col_n3 = st.columns([1, 4, 1])
 days_to_show = 10
 
@@ -155,35 +135,28 @@ with col_n3:
 with col_n2:
     st.markdown(f"<h4 style='text-align: center;'>表示期間: {st.session_state['view_date'].strftime('%Y/%m/%d')} 〜 </h4>", unsafe_allow_html=True)
 
-# --- データ取得 ---
+# --- データ生成 ---
 df = model.get_dataframe(st.session_state['view_date'], days=days_to_show)
 
 # ---------------------------------------------------------
 # 作業可能時間の判定
 # ---------------------------------------------------------
 df['hour'] = df['time'].dt.hour
-# 条件: 潮位 <= 基準値 AND 時間帯内
 df['is_safe'] = (df['level'] <= target_cm) & (df['hour'] >= start_h) & (df['hour'] < end_h)
 
-# リスト作成用ロジック
+# リスト作成ロジック
 safe_windows = []
 if df['is_safe'].any():
-    # 連続区間をグループ化
     df['group'] = (df['is_safe'] != df['is_safe'].shift()).cumsum()
     groups = df[df['is_safe']].groupby('group')
     
     for _, grp in groups:
         start_t = grp['time'].iloc[0]
         end_t = grp['time'].iloc[-1]
-        
-        # 10分以上続く場合のみリストアップ
         if (end_t - start_t).total_seconds() >= 600:
             min_lvl = grp['level'].min()
-            # その時間帯の中での最干潮時刻を探す
             min_row = grp.loc[grp['level'].idxmin()]
-            
             safe_windows.append({
-                "date_obj": start_t.date(),
                 "date_str": start_t.strftime('%m/%d (%a)'),
                 "start": start_t.strftime("%H:%M"),
                 "end": end_t.strftime("%H:%M"),
@@ -192,42 +165,64 @@ if df['is_safe'].any():
             })
 
 # ---------------------------------------------------------
-# グラフ描画
+# グラフ描画 (ピーク検出ロジック改善)
 # ---------------------------------------------------------
-fig, ax = plt.subplots(figsize=(12, 6))
+fig, ax = plt.subplots(figsize=(14, 6))
 
-# 線
-ax.plot(df['time'], df['level'], color='#0066cc', linewidth=2, label="Level", zorder=2)
-# 基準線
-ax.axhline(y=target_cm, color='orange', linestyle='--', linewidth=2, label=f"Limit {target_cm}cm", zorder=1)
-# 塗りつぶし
-ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.5)
+# 潮位線 & 基準線
+ax.plot(df['time'], df['level'], color='#0066cc', linewidth=2, label="潮位", zorder=2)
+ax.axhline(y=target_cm, color='orange', linestyle='--', linewidth=2, label=f"基準 {target_cm}cm", zorder=1)
+ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.5, label="作業可能")
 
-# ピーク表示 (文字重なり対策のため、極小値のみ表示するなど工夫)
-# ここではご要望通り「干潮の時刻と潮位」を表示
-window = 10
-df['is_low'] = df['level'].rolling(window=15, center=True).apply(lambda x: 1 if x[7] == min(x) else 0, raw=True)
-low_tides = df[df['is_low'] == 1]
+# --- ピーク検出 (極値判定) ---
+# データをnumpy配列に変換して高速処理
+levels = df['level'].values
+times = df['time'].tolist()
+n = len(levels)
 
-for i, row in low_tides.iterrows():
-    # 文字が重なりにくいよう、交互に高さを変える
-    y_offset = -20 if i % 2 == 0 else -40
+# 極大(満潮)・極小(干潮)を探す
+high_indices = []
+low_indices = []
+
+# 前後関係を見てピークを探す (ウィンドウ幅3)
+for i in range(1, n-1):
+    # 満潮判定: 前後より高く、かつ絶対値がある程度高い(MSL以上)
+    if levels[i-1] < levels[i] and levels[i] > levels[i+1]:
+        if levels[i] > 180: # ノイズ除去のためMSL以上のみ
+            high_indices.append(i)
     
-    # マーカー
-    ax.scatter(row['time'], row['level'], color='blue', marker='v', s=30, zorder=3)
-    
-    # ラベル (文字化け回避のため英数字のみ推奨だが、フォント設定済みなら日本語も可)
-    # ここでは見やすさ重視で時刻と潮位のみ
-    label = f"{row['time'].strftime('%H:%M')}\n{int(row['level'])}"
-    ax.annotate(label, (row['time'], row['level']), xytext=(0, y_offset), 
-                textcoords='offset points', ha='center', fontsize=9, color='#000088', fontweight='bold')
+    # 干潮判定: 前後より低く、かつ絶対値がある程度低い(MSL以下)
+    if levels[i-1] > levels[i] and levels[i] < levels[i+1]:
+        if levels[i] < 220: # ノイズ除去
+            low_indices.append(i)
+
+# 満潮ラベル描画
+for i in high_indices:
+    t = times[i]
+    l = levels[i]
+    ax.scatter(t, l, color='red', marker='^', s=40, zorder=3)
+    # 文字重なりを防ぐため交互に高さを変える
+    offset = 15 if (t.day % 2 == 0) else 30
+    ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, offset), 
+                textcoords='offset points', ha='center', fontsize=9, color='#cc0000', fontweight='bold')
+
+# 干潮ラベル描画
+for i in low_indices:
+    t = times[i]
+    l = levels[i]
+    ax.scatter(t, l, color='blue', marker='v', s=40, zorder=3)
+    offset = -25 if (t.day % 2 == 0) else -40
+    ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, offset), 
+                textcoords='offset points', ha='center', fontsize=9, color='#0000cc', fontweight='bold')
 
 # 軸設定
-ax.set_ylabel("Level (cm)")
+ax.set_ylabel("潮位 (cm)")
 ax.grid(True, linestyle=':', alpha=0.6)
 ax.xaxis.set_major_locator(mdates.DayLocator())
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
+ax.set_ylim(bottom=-20) # 干潮が見切れないように下限を設定
 
+plt.title(f"大西港 潮汐グラフ ({st.session_state['view_date'].strftime('%Y/%m/%d')} 〜)", fontsize=14)
 plt.tight_layout()
 st.pyplot(fig)
 
@@ -240,16 +235,14 @@ if not safe_windows:
     st.warning("指定条件で作業できる時間がありません。基準を見直してください。")
 else:
     res_df = pd.DataFrame(safe_windows)
-    
-    # 必要な列を選んで表示
     st.dataframe(
-        res_df[['date_str', 'start', 'end', 'min_level', 'low_time']],
+        res_df,
         use_container_width=True,
         hide_index=True,
         column_config={
             "date_str": st.column_config.TextColumn("日付", width="small"),
-            "start": st.column_config.TextColumn("作業開始", width="small"),
-            "end": st.column_config.TextColumn("作業終了", width="small"),
+            "start": st.column_config.TextColumn("開始", width="small"),
+            "end": st.column_config.TextColumn("終了", width="small"),
             "min_level": st.column_config.TextColumn("最干潮位", width="small"),
             "low_time": st.column_config.TextColumn("干潮時刻", width="small"),
         }
