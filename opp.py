@@ -17,20 +17,16 @@ st.set_page_config(layout="wide", page_title="大西港 潮汐アプリ")
 def configure_font():
     """
     環境に存在する日本語フォントを探してMatplotlibに設定する。
-    Streamlit Cloud (Linux) や Windows/Mac に対応。
     """
-    # 優先順位の高いフォントリスト
     target_fonts = [
         'Meiryo', 'Yu Gothic', 'HiraKakuProN-W3', 
         'Hiragino Sans', 'TakaoGothic', 'IPAGothic', 
         'Noto Sans CJK JP', 'IPAexGothic', 'Arial Unicode MS'
     ]
     
-    found_font = None
     # システムのフォントを全走査
     font_list = font_manager.findSystemFonts(fontpaths=None, fontext='ttf')
     
-    # ターゲットのフォント名がファイルパスに含まれているかチェック
     for target in target_fonts:
         for path in font_list:
             if target.lower() in path.lower():
@@ -38,11 +34,9 @@ def configure_font():
                     font_manager.fontManager.addfont(path)
                     prop = font_manager.FontProperties(fname=path)
                     plt.rcParams['font.family'] = prop.get_name()
-                    return # 見つかったら終了
+                    return
                 except:
                     continue
-                    
-    # 見つからなかった場合のフォールバック（英語など）
     plt.rcParams['font.family'] = 'sans-serif'
 
 configure_font()
@@ -98,20 +92,22 @@ class FixedKureTideModel:
         return pd.DataFrame(data)
 
     def get_current_level(self):
-        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-        return now, self._calc_raw(now)
+        # ★ここを修正 (タイムゾーン情報を削除してNaiveにする)
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_jst = now_utc + datetime.timedelta(hours=9)
+        now_naive = now_jst.replace(tzinfo=None) 
+        return now_naive, self._calc_raw(now_naive)
 
 # ---------------------------------------------------------
 # メイン画面 UI
 # ---------------------------------------------------------
-st.title("⚓ 大西港") # タイトルシンプル化
+st.title("⚓ 大西港") 
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
 
 # --- サイドバー設定 ---
 with st.sidebar:
     st.header("⚙️ 作業条件設定")
     
-    # 条件設定
     target_cm = st.number_input("作業基準潮位 (cm)", value=120, step=10, help="これ以下なら作業可能")
     start_h, end_h = st.slider("作業可能時間帯", 0, 24, (7, 23), format="%d時")
     
@@ -135,7 +131,6 @@ with col_n3:
     if st.button("次の10日 ▶"):
         st.session_state['view_date'] += datetime.timedelta(days=days_to_show)
 with col_n2:
-    # "展示期間" -> "表示期間" に修正
     st.markdown(f"<h4 style='text-align: center;'>表示期間: {st.session_state['view_date'].strftime('%Y/%m/%d')} 〜 </h4>", unsafe_allow_html=True)
 
 # --- データ生成 ---
@@ -156,7 +151,6 @@ if df['is_safe'].any():
         start_t = grp['time'].iloc[0]
         end_t = grp['time'].iloc[-1]
         
-        # 10分以上
         if (end_t - start_t).total_seconds() >= 600:
             min_lvl = grp['level'].min()
             min_time = grp.loc[grp['level'].idxmin(), 'time']
@@ -198,37 +192,28 @@ if graph_start <= curr_time <= graph_end:
                 textcoords='offset points', ha='center', fontsize=10, fontweight='bold',
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gold", alpha=0.9))
 
-# --- 2. 満潮・干潮ピークの表示 ---
-# 満潮のみ赤い三角で表示（時刻・潮位）
+# --- 2. 満潮ピークの表示 (時刻・潮位) ---
 levels = df['level'].values
 times = df['time'].tolist()
 for i in range(1, len(levels)-1):
-    # 満潮判定
     if levels[i-1] < levels[i] and levels[i] > levels[i+1]:
-        if levels[i] > 180: # ノイズ除去
+        if levels[i] > 180: # 満潮
             t, l = times[i], levels[i]
             ax.scatter(t, l, color='red', marker='^', s=40, zorder=3)
-            # 文字重なり防止
             off_y = 15 if (t.day % 2 == 0) else 30
             ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
                         textcoords='offset points', ha='center', fontsize=9, color='#cc0000', fontweight='bold')
 
 # --- 3. 作業時間の表示 (干潮の下に黄色文字) ---
-# 計算済みの safe_windows を使用して表示
 for win in safe_windows:
-    # グラフ上の位置: その時間帯の「一番低い潮位(min_time)」の下
     x_pos = win['min_time']
     y_pos = win['min_level']
     
-    # 干潮マーカー(青)
+    # 干潮マーカー
     ax.scatter(x_pos, y_pos, color='blue', marker='v', s=40, zorder=3)
     
-    # テキスト表示 (黄色/ゴールドで読みやすく、縁取りあり)
-    # 文字列: "4時間30分" のような形式
+    # 作業時間テキスト (濃いゴールド色)
     label = win['duration']
-    
-    # 見やすさのため、背景ボックスをつけるか、色を濃いゴールドにする
-    # ここでは濃いオレンジゴールドを使用
     ax.annotate(label, (x_pos, y_pos), xytext=(0, -25), 
                 textcoords='offset points', ha='center', fontsize=10, 
                 color='#b8860b', fontweight='bold', # Dark Goldenrod
@@ -253,8 +238,6 @@ if not safe_windows:
     st.warning("指定条件で作業できる時間がありません。基準を見直してください。")
 else:
     res_df = pd.DataFrame(safe_windows)
-    
-    # 必要な列だけを抽出・リネーム
     display_df = res_df[['date_str', 'start', 'end', 'duration']]
     
     st.dataframe(
