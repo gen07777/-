@@ -9,25 +9,14 @@ from matplotlib import font_manager
 # ---------------------------------------------------------
 # アプリ設定
 # ---------------------------------------------------------
-st.set_page_config(layout="wide", page_title="大西港 潮汐アプリ")
+st.set_page_config(layout="wide", page_title="Osaki-Kamijima Tide")
 
 # ---------------------------------------------------------
-# フォント設定 (文字化け対策・強化版)
+# フォント設定 (一応残しますが、基本英語表記にします)
 # ---------------------------------------------------------
 def configure_font():
-    """
-    Matplotlibで日本語を表示するための強力なフォント設定。
-    複数のフォントを優先順位付きで指定し、環境にあるものを自動選択させる。
-    """
-    # 日本語を表示できる可能性のあるフォントリスト（優先順位順）
-    fonts = [
-        'Noto Sans CJK JP', 'Meiryo', 'Yu Gothic', 
-        'Hiragino Sans', 'HiraKakuProN-W3', 
-        'TakaoGothic', 'IPAGothic', 'IPAexGothic', 
-        'Arial Unicode MS', 'sans-serif' # 最後の砦
-    ]
-    # rcParamsにリストで設定することで、Matplotlibが利用可能なフォントを順に試す
-    plt.rcParams['font.family'] = fonts
+    # 英語フォントを優先
+    plt.rcParams['font.family'] = 'sans-serif'
 
 configure_font()
 
@@ -35,6 +24,7 @@ configure_font()
 # セッション状態管理
 # ---------------------------------------------------------
 if 'view_date' not in st.session_state:
+    # タイムゾーンを考慮してJSTで初期化
     now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     st.session_state['view_date'] = now_jst.date()
 
@@ -46,9 +36,9 @@ class FixedKureTideModel:
         # 基準日時 (1/7 12:39 満潮 342cm)
         self.epoch_time = datetime.datetime(2026, 1, 7, 12, 39)
         self.epoch_level = 342.0
-        self.msl = 180.0 # 平均水面
+        self.msl = 180.0 
         
-        # 主要分潮定数
+        # 分潮定数
         self.consts = [
             {'name': 'M2', 'amp': 130.0, 'speed': 28.984},
             {'name': 'S2', 'amp': 50.0,  'speed': 30.000},
@@ -56,7 +46,6 @@ class FixedKureTideModel:
             {'name': 'O1', 'amp': 33.0,  'speed': 13.943}
         ]
         
-        # 振幅補正
         total_amp_theory = sum(c['amp'] for c in self.consts)
         actual_amp = self.epoch_level - self.msl
         self.scale_factor = actual_amp / total_amp_theory
@@ -90,21 +79,19 @@ class FixedKureTideModel:
 # ---------------------------------------------------------
 # メイン画面 UI
 # ---------------------------------------------------------
-st.title("⚓ 大西港")
+st.title("⚓ Osaki-Kamijima Tide Monitor")
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
 
 # --- サイドバー設定 ---
 with st.sidebar:
-    st.header("⚙️ 作業条件設定")
+    st.header("⚙️ Settings")
     
-    # 条件設定
-    target_cm = st.number_input("作業基準潮位 (cm)", value=120, step=10, help="これ以下なら作業可能")
-    start_h, end_h = st.slider("作業可能時間帯", 0, 24, (7, 23), format="%d時")
+    target_cm = st.number_input("Work Limit Level (cm)", value=120, step=10, help="作業基準潮位")
+    start_h, end_h = st.slider("Workable Hours", 0, 24, (7, 23), format="%d:00")
     
     st.markdown("---")
-    st.caption("自動計算モード動作中")
     
-    if st.button("今日の日付に戻る"):
+    if st.button("Back to Today"):
         st.session_state['view_date'] = now_jst.date()
 
 # --- 計算実行 ---
@@ -115,19 +102,19 @@ col_n1, col_n2, col_n3 = st.columns([1, 4, 1])
 days_to_show = 10
 
 with col_n1:
-    if st.button("◀ 前の10日"):
+    if st.button("◀ Prev 10d"):
         st.session_state['view_date'] -= datetime.timedelta(days=days_to_show)
 with col_n3:
-    if st.button("次の10日 ▶"):
+    if st.button("Next 10d ▶"):
         st.session_state['view_date'] += datetime.timedelta(days=days_to_show)
 with col_n2:
-    st.markdown(f"<h4 style='text-align: center;'>表示期間: {st.session_state['view_date'].strftime('%Y/%m/%d')} 〜 </h4>", unsafe_allow_html=True)
+    st.markdown(f"<h4 style='text-align: center;'>Range: {st.session_state['view_date'].strftime('%Y/%m/%d')} - </h4>", unsafe_allow_html=True)
 
 # --- データ生成 ---
 df = model.get_dataframe(st.session_state['view_date'], days=days_to_show)
 
 # ---------------------------------------------------------
-# 作業可能時間の計算 & リスト作成
+# 作業可能時間の計算
 # ---------------------------------------------------------
 df['hour'] = df['time'].dt.hour
 df['is_safe'] = (df['level'] <= target_cm) & (df['hour'] >= start_h) & (df['hour'] < end_h)
@@ -141,100 +128,101 @@ if df['is_safe'].any():
         start_t = grp['time'].iloc[0]
         end_t = grp['time'].iloc[-1]
         
-        # 10分以上
         if (end_t - start_t).total_seconds() >= 600:
             min_lvl = grp['level'].min()
-            # 干潮時刻を取得
             min_time = grp.loc[grp['level'].idxmin(), 'time']
             
-            # 作業時間を計算
+            # 作業時間を計算 (例: 1:30)
             duration = end_t - start_t
             hours = duration.seconds // 3600
             minutes = (duration.seconds % 3600) // 60
-            dur_str = f"{hours}時間{minutes:02}分"
+            dur_str = f"{hours}:{minutes:02}" # 英語表記に変更
             
             safe_windows.append({
                 "date_str": start_t.strftime('%m/%d (%a)'),
                 "start": start_t.strftime("%H:%M"),
                 "end": end_t.strftime("%H:%M"),
-                "duration": dur_str,
-                "min_time": min_time, # グラフ描画用
-                "min_level": min_lvl  # グラフ描画用
+                "duration": dur_str, # リスト表示用
+                "graph_label": f"Work Time\n{dur_str}", # グラフ表示用
+                "min_time": min_time,
+                "min_level": min_lvl
             })
 
 # ---------------------------------------------------------
-# グラフ描画
+# グラフ描画 (All English)
 # ---------------------------------------------------------
 fig, ax = plt.subplots(figsize=(14, 7))
 
 # 潮位線 & 基準線
-ax.plot(df['time'], df['level'], color='#0066cc', linewidth=2, label="潮位", zorder=2)
-ax.axhline(y=target_cm, color='orange', linestyle='--', linewidth=2, label=f"基準 {target_cm}cm", zorder=1)
-ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4, label="作業可能")
+ax.plot(df['time'], df['level'], color='#0066cc', linewidth=2, label="Level", zorder=2)
+ax.axhline(y=target_cm, color='orange', linestyle='--', linewidth=2, label=f"Limit {target_cm}cm", zorder=1)
+ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4, label="Workable")
 
-# --- 1. 現在位置の表示 (黄色い点) ---
+# --- 1. 現在位置 (Now) ---
 curr_time, curr_lvl = model.get_current_level()
 graph_start = df['time'].iloc[0]
 graph_end = df['time'].iloc[-1]
+
 if graph_start <= curr_time <= graph_end:
-    ax.scatter(curr_time, curr_lvl, color='gold', edgecolors='black', s=150, zorder=10, label="現在")
-    # 文字化け対策済みフォントで描画
-    ax.annotate("現在", (curr_time, curr_lvl), xytext=(0, 20), 
+    ax.scatter(curr_time, curr_lvl, color='gold', edgecolors='black', s=150, zorder=10)
+    # 英語 "Now" に変更
+    ax.annotate(f"Now\n{int(curr_lvl)}cm", (curr_time, curr_lvl), xytext=(0, 20), 
                 textcoords='offset points', ha='center', fontsize=10, fontweight='bold',
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gold", alpha=0.9))
 
-# --- 2. ピークの表示 (満潮・干潮) ---
+# --- 2. ピーク (High/Low) ---
 levels = df['level'].values
 times = df['time'].tolist()
 for i in range(1, len(levels)-1):
     t, l = times[i], levels[i]
     
-    # 満潮プロット (MSLより上)
+    # 満潮 (High)
     if levels[i-1] < l and l > levels[i+1] and l > 180:
         ax.scatter(t, l, color='red', marker='^', s=40, zorder=3)
         off_y = 15 if (t.day % 2 == 0) else 30
+        # 時刻と高さのみ (数字なので文字化けしない)
         ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
                     textcoords='offset points', ha='center', fontsize=9, color='#cc0000', fontweight='bold')
 
-    # 干潮プロット (MSLより下) - 時刻を追加して復活
+    # 干潮 (Low)
     if levels[i-1] > l and l < levels[i+1] and l < 180:
         ax.scatter(t, l, color='blue', marker='v', s=40, zorder=3)
         off_y = -25 if (t.day % 2 == 0) else -40
-        # 【修正】時刻と潮位を表示
+        # 時刻と高さ
         label = f"{t.strftime('%H:%M')}\n{int(l)}"
         ax.annotate(label, (t, l), xytext=(0, off_y), 
                     textcoords='offset points', ha='center', fontsize=9, color='#0000cc', fontweight='bold')
 
-# --- 3. 作業時間の表示 (干潮の下に黄色文字) ---
+# --- 3. 作業時間 (Work Time) ---
 for win in safe_windows:
     x_pos = win['min_time']
     y_pos = win['min_level']
     
-    # 作業時間テキスト (文字化け対策済み)
-    label = win['duration']
-    # 干潮ラベルと重ならないよう、さらに下に表示
-    ax.annotate(label, (x_pos, y_pos), xytext=(0, -55), 
-                textcoords='offset points', ha='center', fontsize=10, 
+    # 英語ラベル "Work Time 4:30"
+    label = win['graph_label']
+    
+    ax.annotate(label, (x_pos, y_pos), xytext=(0, -60), 
+                textcoords='offset points', ha='center', fontsize=9, 
                 color='#b8860b', fontweight='bold',
                 bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
 
-# 軸設定
-ax.set_ylabel("潮位 (cm)")
+# 軸ラベル等 (English)
+ax.set_ylabel("Level (cm)")
 ax.grid(True, linestyle=':', alpha=0.6)
 ax.xaxis.set_major_locator(mdates.DayLocator())
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-ax.set_ylim(bottom=-60) # 作業時間表示のために下限を広げる
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)')) # 曜日は英語環境ならMonなどになる
+ax.set_ylim(bottom=-70) # ラベルスペース確保
 
 plt.tight_layout()
 st.pyplot(fig)
 
 # ---------------------------------------------------------
-# 作業可能時間検討リスト
+# 作業可能時間リスト (ここは日本語でもOKだが、念のためシンプルに)
 # ---------------------------------------------------------
-st.markdown(f"### 📋 作業可能時間検討リスト (基準 {target_cm}cm以下)")
+st.markdown(f"### 📋 Workable Time List (Level <= {target_cm}cm)")
 
 if not safe_windows:
-    st.warning("指定条件で作業できる時間がありません。基準を見直してください。")
+    st.warning("No workable time found.")
 else:
     res_df = pd.DataFrame(safe_windows)
     display_df = res_df[['date_str', 'start', 'end', 'duration']]
@@ -244,9 +232,9 @@ else:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "date_str": st.column_config.TextColumn("日付", width="medium"),
-            "start": st.column_config.TextColumn("開始時刻", width="medium"),
-            "end": st.column_config.TextColumn("終了時刻", width="medium"),
-            "duration": st.column_config.TextColumn("作業時間", width="medium", help="この回に確保できる連続作業時間"),
+            "date_str": st.column_config.TextColumn("Date", width="medium"),
+            "start": st.column_config.TextColumn("Start", width="medium"),
+            "end": st.column_config.TextColumn("End", width="medium"),
+            "duration": st.column_config.TextColumn("Duration", width="medium"),
         }
     )
