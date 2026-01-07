@@ -12,7 +12,7 @@ from matplotlib import font_manager
 st.set_page_config(layout="wide", page_title="Onishi Port Tide Master")
 
 # ---------------------------------------------------------
-# フォント設定 (英語表記で文字化け回避)
+# フォント設定 (グラフは英語表記で統一)
 # ---------------------------------------------------------
 def configure_font():
     plt.rcParams['font.family'] = 'sans-serif'
@@ -27,7 +27,7 @@ if 'view_date' not in st.session_state:
     st.session_state['view_date'] = now_jst.date()
 
 # ---------------------------------------------------------
-# 潮汐計算モデル (1/7基準・調和分解)
+# 潮汐計算モデル
 # ---------------------------------------------------------
 class HarmonicTideModel:
     def __init__(self):
@@ -36,7 +36,6 @@ class HarmonicTideModel:
         self.epoch_level = 342.0
         self.msl = 180.0
         
-        # 分潮定数
         self.consts = [
             {'name': 'M2', 'amp': 130.0, 'speed': 28.984},
             {'name': 'S2', 'amp': 50.0,  'speed': 30.000},
@@ -44,7 +43,6 @@ class HarmonicTideModel:
             {'name': 'O1', 'amp': 33.0,  'speed': 13.943}
         ]
         
-        # スケール補正
         total_amp_theory = sum(c['amp'] for c in self.consts)
         actual_amp = self.epoch_level - self.msl
         self.scale_factor = actual_amp / total_amp_theory
@@ -81,7 +79,7 @@ class HarmonicTideModel:
 st.title("⚓ Onishi Port Tide Master")
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
 
-# --- サイドバー設定 ---
+# --- サイドバー ---
 with st.sidebar:
     st.header("⚙️ Work Settings")
     
@@ -89,14 +87,16 @@ with st.sidebar:
     start_h, end_h = st.slider("Workable Hours", 0, 24, (7, 23), format="%d:00")
     
     st.markdown("---")
-    
     if st.button("Back to Today"):
         st.session_state['view_date'] = now_jst.date()
 
 # --- 計算実行 ---
 model = HarmonicTideModel()
 
-# --- 期間切り替え ---
+# 現在の潮位を取得 (表示用に先に計算)
+curr_time, curr_lvl = model.get_current_level()
+
+# --- ナビゲーション & 現在状況表示 (Periodの下に配置) ---
 col_n1, col_n2, col_n3 = st.columns([1, 4, 1])
 days_to_show = 10
 
@@ -106,8 +106,12 @@ with col_n1:
 with col_n3:
     if st.button("Next 10d ▶"):
         st.session_state['view_date'] += datetime.timedelta(days=days_to_show)
+
 with col_n2:
-    st.markdown(f"<h4 style='text-align: center;'>Period: {st.session_state['view_date'].strftime('%Y/%m/%d')} - </h4>", unsafe_allow_html=True)
+    # 期間表示
+    st.markdown(f"<h4 style='text-align: center; margin-bottom: 0px;'>Period: {st.session_state['view_date'].strftime('%Y/%m/%d')} - </h4>", unsafe_allow_html=True)
+    # ★ここに現在潮位を表示 (グラフの外、Periodの下)
+    st.markdown(f"<h3 style='text-align: center; color: #0066cc; margin-top: 0px;'>Current: {curr_time.strftime('%H:%M')} | Level: {int(curr_lvl)}cm</h3>", unsafe_allow_html=True)
 
 # --- データ生成 ---
 df = model.get_dataframe(st.session_state['view_date'], days=days_to_show)
@@ -141,7 +145,7 @@ if df['is_safe'].any():
                 "start": start_t.strftime("%H:%M"),
                 "end": end_t.strftime("%H:%M"),
                 "duration": dur_str,
-                "graph_label": f"Work\n{dur_str}", # 短縮表記 "Work"
+                "graph_label": f"Work\n{dur_str}",
                 "min_time": min_time,
                 "min_level": min_lvl
             })
@@ -156,19 +160,12 @@ ax.plot(df['time'], df['level'], color='#0066cc', linewidth=2, label="Level", zo
 ax.axhline(y=target_cm, color='orange', linestyle='--', linewidth=2, label=f"Limit {target_cm}cm", zorder=1)
 ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4, label="Workable")
 
-# 1. 現在位置 (黄色い丸のみ)
-curr_time, curr_lvl = model.get_current_level()
+# 1. 現在位置 (黄色い丸のみ、文字はグラフ外へ移動済み)
 graph_start = df['time'].iloc[0]
 graph_end = df['time'].iloc[-1]
 
 if graph_start <= curr_time <= graph_end:
-    # 黄色い丸だけプロット
     ax.scatter(curr_time, curr_lvl, color='gold', edgecolors='black', s=180, zorder=10)
-    
-    # ★現在潮位をグラフの枠外左上(タイトル位置)に表示
-    # 日本語を避けて英語で表示
-    status_text = f"Current: {curr_time.strftime('%H:%M')}  Level: {int(curr_lvl)}cm"
-    ax.set_title(status_text, loc='left', fontsize=14, fontweight='bold', color='#333333')
 
 # 2. ピーク (High/Low)
 levels = df['level'].values
@@ -176,14 +173,14 @@ times = df['time'].tolist()
 for i in range(1, len(levels)-1):
     t, l = times[i], levels[i]
     
-    # 満潮 (High)
+    # High Tide
     if levels[i-1] < l and l > levels[i+1] and l > 180:
         ax.scatter(t, l, color='red', marker='^', s=40, zorder=3)
         off_y = 15 if (t.day % 2 == 0) else 30
         ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
                     textcoords='offset points', ha='center', fontsize=9, color='#cc0000', fontweight='bold')
     
-    # 干潮 (Low)
+    # Low Tide
     if levels[i-1] > l and l < levels[i+1] and l < 180:
         ax.scatter(t, l, color='blue', marker='v', s=40, zorder=3)
         off_y = -25 if (t.day % 2 == 0) else -40
@@ -194,7 +191,7 @@ for i in range(1, len(levels)-1):
 for win in safe_windows:
     x = win['min_time']
     y = win['min_level']
-    # "Work" + 時間
+    # 干潮の下に短縮表記で表示
     ax.annotate(win['graph_label'], (x, y), xytext=(0, -65), 
                 textcoords='offset points', ha='center', fontsize=9, 
                 color='#b8860b', fontweight='bold',
@@ -211,7 +208,7 @@ plt.tight_layout()
 st.pyplot(fig)
 
 # ---------------------------------------------------------
-# 作業可能時間リスト (日本語OK)
+# 作業可能時間リスト
 # ---------------------------------------------------------
 st.markdown(f"### 📋 作業可能時間検討リスト (Level <= {target_cm}cm)")
 
