@@ -12,7 +12,7 @@ from matplotlib import font_manager
 st.set_page_config(layout="wide", page_title="Onishi Port Tide Master")
 
 # ---------------------------------------------------------
-# フォント設定 (グラフは英語表記で統一)
+# フォント設定
 # ---------------------------------------------------------
 def configure_font():
     plt.rcParams['font.family'] = 'sans-serif'
@@ -31,7 +31,6 @@ if 'view_date' not in st.session_state:
 # ---------------------------------------------------------
 class HarmonicTideModel:
     def __init__(self):
-        # 基準日時: 2026/1/7 12:39 満潮 342cm
         self.epoch_time = datetime.datetime(2026, 1, 7, 12, 39)
         self.epoch_level = 342.0
         self.msl = 180.0
@@ -76,40 +75,44 @@ class HarmonicTideModel:
 # ---------------------------------------------------------
 # メイン画面 UI
 # ---------------------------------------------------------
-st.title("⚓ Onishi Port Tide Master")
+# タイトルを小さく (h4相当)
+st.markdown("<h4 style='text-align: left; margin-bottom: 5px;'>⚓ Onishi Port Tide Master</h4>", unsafe_allow_html=True)
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-
-# --- サイドバー ---
-with st.sidebar:
-    st.header("⚙️ Work Settings")
-    
-    target_cm = st.number_input("Work Limit Level (cm)", value=120, step=10)
-    start_h, end_h = st.slider("Workable Hours", 0, 24, (7, 23), format="%d:00")
-    
-    st.markdown("---")
-    if st.button("Back to Today"):
-        st.session_state['view_date'] = now_jst.date()
 
 # --- 計算実行 ---
 model = HarmonicTideModel()
-
-# 現在の潮位を取得
 curr_time, curr_lvl = model.get_current_level()
 
-# --- ナビゲーション & 現在状況表示 ---
-col_n1, col_n2, col_n3 = st.columns([1, 4, 1])
-days_to_show = 10
+# --- 情報表示 (コンパクトに) ---
+# PeriodとCurrentを一行または小さいブロックで表示
+info_html = f"""
+<div style="font-size: 0.9rem; margin-bottom: 10px; color: #555;">
+  <b>Period:</b> {st.session_state['view_date'].strftime('%Y/%m/%d')} - <br>
+  <span style="color: #0066cc;"><b>Current:</b> {curr_time.strftime('%H:%M')} | <b>Level:</b> {int(curr_lvl)}cm</span>
+</div>
+"""
+st.markdown(info_html, unsafe_allow_html=True)
 
-with col_n1:
-    if st.button("◀ Prev 10d"):
+# --- ナビゲーションボタン (左右配置) ---
+days_to_show = 10
+col_prev, col_next = st.columns(2) # 2列で左右に配置
+
+with col_prev:
+    if st.button("<< Prev 10d", use_container_width=True):
         st.session_state['view_date'] -= datetime.timedelta(days=days_to_show)
-with col_n3:
-    if st.button("Next 10d ▶"):
+
+with col_next:
+    if st.button("Next 10d >>", use_container_width=True):
         st.session_state['view_date'] += datetime.timedelta(days=days_to_show)
 
-with col_n2:
-    st.markdown(f"<h4 style='text-align: center; margin-bottom: 0px;'>Period: {st.session_state['view_date'].strftime('%Y/%m/%d')} - </h4>", unsafe_allow_html=True)
-    st.markdown(f"<h3 style='text-align: center; color: #0066cc; margin-top: 0px;'>Current: {curr_time.strftime('%H:%M')} | Level: {int(curr_lvl)}cm</h3>", unsafe_allow_html=True)
+# --- サイドバー ---
+with st.sidebar:
+    st.header("⚙️ Settings")
+    target_cm = st.number_input("Work Limit Level (cm)", value=120, step=10)
+    start_h, end_h = st.slider("Workable Hours", 0, 24, (7, 23), format="%d:00")
+    st.markdown("---")
+    if st.button("Back to Today"):
+        st.session_state['view_date'] = now_jst.date()
 
 # --- データ生成 ---
 df = model.get_dataframe(st.session_state['view_date'], days=days_to_show)
@@ -151,19 +154,18 @@ if df['is_safe'].any():
 # ---------------------------------------------------------
 # グラフ描画
 # ---------------------------------------------------------
-fig, ax = plt.subplots(figsize=(14, 7))
+fig, ax = plt.subplots(figsize=(10, 5)) # スマホ向けに少しコンパクトに
 
 # 線と基準
 ax.plot(df['time'], df['level'], color='#0066cc', linewidth=2, label="Level", zorder=2)
 ax.axhline(y=target_cm, color='orange', linestyle='--', linewidth=2, label=f"Limit {target_cm}cm", zorder=1)
 ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4, label="Workable")
 
-# 1. 現在位置 (黄色い丸) - サイズを半分の90に変更
+# 1. 現在位置 (黄色い丸)
 graph_start = df['time'].iloc[0]
 graph_end = df['time'].iloc[-1]
 
 if graph_start <= curr_time <= graph_end:
-    # s=180 -> s=90 に変更
     ax.scatter(curr_time, curr_lvl, color='gold', edgecolors='black', s=90, zorder=10)
 
 # 2. ピーク (High/Low)
@@ -186,11 +188,11 @@ for i in range(1, len(levels)-1):
         ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
                     textcoords='offset points', ha='center', fontsize=9, color='#0000cc', fontweight='bold')
 
-# 3. 作業時間 (Work) - 表示位置をさらに下へ
+# 3. 作業時間 (Work)
 for win in safe_windows:
     x = win['min_time']
     y = win['min_level']
-    # xytextを -65 から -85 に変更してさらに下へ
+    # さらに下へ
     ax.annotate(win['graph_label'], (x, y), xytext=(0, -85), 
                 textcoords='offset points', ha='center', fontsize=9, 
                 color='#b8860b', fontweight='bold',
@@ -201,31 +203,32 @@ ax.set_ylabel("Level (cm)")
 ax.grid(True, linestyle=':', alpha=0.6)
 ax.xaxis.set_major_locator(mdates.DayLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-# 下の余白を広げるために bottom を -110 に変更
 ax.set_ylim(bottom=-110)
 
 plt.tight_layout()
 st.pyplot(fig)
 
 # ---------------------------------------------------------
-# 作業可能時間リスト
+# 作業可能時間検討リスト (コンパクト版)
 # ---------------------------------------------------------
-st.markdown(f"### 📋 作業可能時間検討リスト (Level <= {target_cm}cm)")
+st.markdown(f"##### 📋 Workable Time List (Level <= {target_cm}cm)")
 
 if not safe_windows:
     st.warning("No workable time found.")
 else:
     res_df = pd.DataFrame(safe_windows)
+    # 表示項目
     display_df = res_df[['date_str', 'start', 'end', 'duration']]
     
+    # use_container_width=False で中身に合わせて縮める
     st.dataframe(
         display_df,
-        use_container_width=True,
+        use_container_width=False, 
         hide_index=True,
         column_config={
-            "date_str": st.column_config.TextColumn("日付 (Date)", width="medium"),
-            "start": st.column_config.TextColumn("開始 (Start)", width="medium"),
-            "end": st.column_config.TextColumn("終了 (End)", width="medium"),
-            "duration": st.column_config.TextColumn("作業時間 (Duration)", width="medium"),
+            "date_str": st.column_config.TextColumn("Date", width="small"),
+            "start": st.column_config.TextColumn("Start", width="small"),
+            "end": st.column_config.TextColumn("End", width="small"),
+            "duration": st.column_config.TextColumn("Time", width="small"), # 項目名も短く
         }
     )
