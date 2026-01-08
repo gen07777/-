@@ -5,11 +5,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib import font_manager
+import requests
 
 # ---------------------------------------------------------
 # アプリ設定
 # ---------------------------------------------------------
-st.set_page_config(layout="wide", page_title="Onishi Port Tide Master Pro")
+st.set_page_config(layout="wide", page_title="Onishi Port Tide Master Ultimate")
+
+# ユーザー様のAPIキー (OpenWeatherMap)
+OWM_API_KEY = "f8b87c403597b305f1bbf48a3bdf8dcb"
 
 # ---------------------------------------------------------
 # フォント設定
@@ -27,65 +31,101 @@ if 'view_date' not in st.session_state:
     st.session_state['view_date'] = now_jst.date()
 
 # ---------------------------------------------------------
-# 潮汐計算モデル (本格的調和分解・10分潮モデル)
+# OpenWeatherMap API連携 (通信制限付き)
 # ---------------------------------------------------------
-class AdvancedTideModel:
-    def __init__(self):
-        """
-        タイドグラフBI等のロジックに近づけるため、
-        主要4分潮だけでなく、10分潮を用いて精密計算を行う。
-        基準は1/7の大西港の実測値(画像)に合わせる。
-        """
-        # 基準日時: 2026/1/7 12:39 満潮 342cm
+# ttl=3600秒(1時間) に設定。
+# これにより、1時間に1回だけ通信し、その間はデータを使い回すため
+# 1日最大24アクセス程度に抑えられ、無料枠(1000回)を絶対に超えない。
+@st.cache_data(ttl=3600)
+def get_cached_pressure():
+    """
+    大西港フェリーターミナル周辺の気圧を取得し、1時間キャッシュする
+    """
+    lat = 34.234
+    lon = 132.831
+    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OWM_API_KEY}&units=metric"
+    
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return float(data['main']['pressure'])
+        else:
+            return None
+    except:
+        return None
+
+# ---------------------------------------------------------
+# 月齢・潮名計算
+# ---------------------------------------------------------
+def get_moon_age(date_obj):
+    base_date = datetime.date(2000, 1, 6)
+    diff = (date_obj - base_date).days
+    return diff % 29.53059
+
+def get_tide_name(moon_age):
+    m = int(moon_age)
+    if m >= 30: m -= 30
+    
+    if 0 <= m <= 2 or 14 <= m <= 17 or 29 <= m <= 30:
+        return "Spring Tide (大潮)"
+    elif 3 <= m <= 5 or 18 <= m <= 20:
+        return "Middle Tide (中潮)"
+    elif 6 <= m <= 9 or 21 <= m <= 24:
+        return "Neap Tide (小潮)"
+    elif 10 <= m <= 12:
+        return "Long Tide (長潮)"
+    elif m == 13 or 25 <= m <= 28:
+        return "Young Tide (若潮)"
+    else:
+        return "Middle Tide (中潮)"
+
+# ---------------------------------------------------------
+# 潮汐計算モデル (大西港カスタム・気圧連動)
+# ---------------------------------------------------------
+class OnishiEnvironmentModel:
+    def __init__(self, pressure_hpa=1013.0):
+        # 基準: 2026/1/7 12:39 満潮 342cm
         self.epoch_time = datetime.datetime(2026, 1, 7, 12, 39)
         self.epoch_level = 342.0
         self.msl = 180.0
         
-        # 【改良】日本沿岸の潮汐計算に使われる主要10分潮
-        # 呉港の調和定数比率を参考に設定
-        # speed: 角速度(度/時間), factor: 振幅の重み付け(M2を基準とした比率)
+        # 気圧補正 (1hPa低下 = 1cm上昇)
+        self.pressure_correction = (1013.0 - pressure_hpa) * 1.0
+
+        # 分潮データ
         self.consts = [
-            # 半日周潮 (1日2回)
-            {'name': 'M2',  'speed': 28.984104, 'factor': 1.00}, # 主太陰
-            {'name': 'S2',  'speed': 30.000000, 'factor': 0.45}, # 主太陽
-            {'name': 'N2',  'speed': 28.439730, 'factor': 0.22}, # 大陰楕円率
-            {'name': 'K2',  'speed': 30.082137, 'factor': 0.12}, # 太陽・月
-            
-            # 日周潮 (1日1回)
-            {'name': 'K1',  'speed': 15.041069, 'factor': 0.38}, # 主太陰太陽
-            {'name': 'O1',  'speed': 13.943036, 'factor': 0.28}, # 主太陰
-            {'name': 'P1',  'speed': 14.958931, 'factor': 0.12}, # 主太陽
-            {'name': 'Q1',  'speed': 13.398661, 'factor': 0.05}, # 大陰楕円率
-            
-            # 浅海分潮 (地形の影響) - 波の歪みを再現
-            {'name': 'M4',  'speed': 57.968208, 'factor': 0.03}, 
-            {'name': 'MS4', 'speed': 58.984104, 'factor': 0.02}
+            {'name': 'M2',  'speed': 28.984104, 'factor': 1.00},
+            {'name': 'S2',  'speed': 30.000000, 'factor': 0.45},
+            {'name': 'N2',  'speed': 28.439730, 'factor': 0.22},
+            {'name': 'K2',  'speed': 30.082137, 'factor': 0.12},
+            {'name': 'K1',  'speed': 15.041069, 'factor': 0.38},
+            {'name': 'O1',  'speed': 13.943036, 'factor': 0.28},
+            {'name': 'P1',  'speed': 14.958931, 'factor': 0.12},
+            {'name': 'Q1',  'speed': 13.398661, 'factor': 0.05},
+            {'name': 'M4',  'speed': 57.968208, 'factor': 0.08},
+            {'name': 'MS4', 'speed': 58.984104, 'factor': 0.06}
         ]
         
-        # スケール補正 (基準日の高さに合うように全体の振幅係数を逆算)
-        # 基準時(1/7 12:39)は満潮なので、位相が揃っていると仮定して最大値を計算
         total_factor = sum(c['factor'] for c in self.consts)
         actual_amp = self.epoch_level - self.msl
-        
-        # これが「大西港の地形係数」に相当します
         self.base_amp = actual_amp / total_factor
 
     def _calc_raw(self, target_dt):
         delta_hours = (target_dt - self.epoch_time).total_seconds() / 3600.0
-        level = self.msl
+        level = self.msl + self.pressure_correction
         
         for c in self.consts:
-            # 各分潮の合成
             theta_rad = math.radians(c['speed'] * delta_hours)
-            # 振幅 = 基礎振幅 × 各分潮の比率
-            level += (self.base_amp * c['factor']) * math.cos(theta_rad)
-            
+            phase_shift = 0
+            if c['name'] in ['M4', 'MS4']:
+                phase_shift = math.radians(90)
+            level += (self.base_amp * c['factor']) * math.cos(theta_rad - phase_shift)
         return level
 
     def get_dataframe(self, start_date, days=10, interval_min=10):
         start_dt = datetime.datetime.combine(start_date, datetime.time(0, 0))
         end_dt = start_dt + datetime.timedelta(days=days) - datetime.timedelta(minutes=1)
-        
         data = []
         curr = start_dt
         while curr <= end_dt:
@@ -103,19 +143,43 @@ class AdvancedTideModel:
 # ---------------------------------------------------------
 # メイン画面 UI
 # ---------------------------------------------------------
-# タイトル
-st.markdown("<h4 style='text-align: left; margin-bottom: 5px;'>⚓ Onishi Port Tide Master Pro</h4>", unsafe_allow_html=True)
+st.markdown("<h4 style='text-align: left; margin-bottom: 5px;'>⚓ Onishi Port Tide Master</h4>", unsafe_allow_html=True)
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
 
+# --- 気圧自動取得 ---
+fetched_pressure = get_cached_pressure()
+
+# 取得できた場合はその値を、エラーなら標準値(1013)を使用
+current_pressure = fetched_pressure if fetched_pressure else 1013.0
+pressure_status_text = "Auto Update" if fetched_pressure else "Standard (No Data)"
+
 # --- 計算実行 ---
-model = AdvancedTideModel()
+model = OnishiEnvironmentModel(pressure_hpa=current_pressure)
 curr_time, curr_lvl = model.get_current_level()
 
+# 月齢・潮名
+current_view_date = st.session_state['view_date']
+moon_age = get_moon_age(current_view_date)
+tide_name = get_tide_name(moon_age)
+
 # --- 情報表示 ---
+pressure_diff = int(1013 - current_pressure)
+# 補正値の表示文字列 (+5cm など)
+correction_str = f"+{pressure_diff}" if pressure_diff > 0 else f"{pressure_diff}"
+if pressure_diff == 0: correction_str = "±0"
+
 info_html = f"""
-<div style="font-size: 0.9rem; margin-bottom: 10px; color: #555;">
-  <b>Period:</b> {st.session_state['view_date'].strftime('%Y/%m/%d')} - <br>
-  <span style="color: #0066cc;"><b>Current:</b> {curr_time.strftime('%H:%M')} | <b>Level:</b> {int(curr_lvl)}cm</span>
+<div style="font-size: 0.9rem; margin-bottom: 5px; color: #444; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border: 1px solid #ddd;">
+  <div style="margin-bottom: 4px;">
+    <b>Date:</b> {current_view_date.strftime('%Y/%m/%d')} 
+    <span style="margin-left:8px; color:#555;">Moon: {moon_age:.1f} ({tide_name})</span>
+  </div>
+  <div style="font-size: 1.0rem;">
+    <span style="color: #0066cc;"><b>Current:</b> {curr_time.strftime('%H:%M')} | <b>Level:</b> {int(curr_lvl)}cm</span>
+    <span style="font-size: 0.85rem; color: #666; margin-left: 8px;">
+      (Pressure: {int(current_pressure)}hPa <span style="color:#d62728;">Correction {correction_str}cm</span>)
+    </span>
+  </div>
 </div>
 """
 st.markdown(info_html, unsafe_allow_html=True)
@@ -123,22 +187,23 @@ st.markdown(info_html, unsafe_allow_html=True)
 # --- ナビゲーション ---
 days_to_show = 10
 col_prev, col_next = st.columns(2)
-
 with col_prev:
     if st.button("<< Prev 10d", use_container_width=True):
         st.session_state['view_date'] -= datetime.timedelta(days=days_to_show)
-
 with col_next:
     if st.button("Next 10d >>", use_container_width=True):
         st.session_state['view_date'] += datetime.timedelta(days=days_to_show)
 
-# --- サイドバー ---
+# --- サイドバー (設定のみ・入力なし) ---
 with st.sidebar:
     st.header("⚙️ Settings")
+    st.info(f"📡 Weather Data: {pressure_status_text}\nPressure: {current_pressure} hPa")
+    
+    st.markdown("---")
     target_cm = st.number_input("Work Limit Level (cm)", value=120, step=10)
     start_h, end_h = st.slider("Workable Hours", 0, 24, (7, 23), format="%d:00")
+    
     st.markdown("---")
-    st.caption("Calculation Model: 10 Constituents (JMA Style)")
     if st.button("Back to Today"):
         st.session_state['view_date'] = now_jst.date()
 
@@ -215,7 +280,7 @@ for i in range(1, len(levels)-1):
         ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
                     textcoords='offset points', ha='center', fontsize=9, color='#0000cc', fontweight='bold')
 
-# 3. Workラベル (被らないように下へ)
+# 3. Workラベル
 for win in safe_windows:
     x = win['min_time']
     y = win['min_level']
@@ -235,7 +300,7 @@ plt.tight_layout()
 st.pyplot(fig)
 
 # ---------------------------------------------------------
-# 作業可能時間リスト (コンパクト版)
+# 作業可能時間リスト (コンパクト)
 # ---------------------------------------------------------
 st.markdown(f"##### 📋 Workable Time List (Level <= {target_cm}cm)")
 
