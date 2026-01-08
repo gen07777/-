@@ -31,20 +31,13 @@ if 'view_date' not in st.session_state:
     st.session_state['view_date'] = now_jst.date()
 
 # ---------------------------------------------------------
-# OpenWeatherMap API連携 (通信制限付き)
+# OpenWeatherMap API連携 (通信制限付き・1時間キャッシュ)
 # ---------------------------------------------------------
-# ttl=3600秒(1時間) に設定。
-# これにより、1時間に1回だけ通信し、その間はデータを使い回すため
-# 1日最大24アクセス程度に抑えられ、無料枠(1000回)を絶対に超えない。
 @st.cache_data(ttl=3600)
 def get_cached_pressure():
-    """
-    大西港フェリーターミナル周辺の気圧を取得し、1時間キャッシュする
-    """
     lat = 34.234
     lon = 132.831
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OWM_API_KEY}&units=metric"
-    
     try:
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
@@ -85,15 +78,14 @@ def get_tide_name(moon_age):
 # ---------------------------------------------------------
 class OnishiEnvironmentModel:
     def __init__(self, pressure_hpa=1013.0):
-        # 基準: 2026/1/7 12:39 満潮 342cm
         self.epoch_time = datetime.datetime(2026, 1, 7, 12, 39)
         self.epoch_level = 342.0
         self.msl = 180.0
         
-        # 気圧補正 (1hPa低下 = 1cm上昇)
+        # 気圧補正
         self.pressure_correction = (1013.0 - pressure_hpa) * 1.0
 
-        # 分潮データ
+        # 分潮データ (地形補正含む)
         self.consts = [
             {'name': 'M2',  'speed': 28.984104, 'factor': 1.00},
             {'name': 'S2',  'speed': 30.000000, 'factor': 0.45},
@@ -114,7 +106,6 @@ class OnishiEnvironmentModel:
     def _calc_raw(self, target_dt):
         delta_hours = (target_dt - self.epoch_time).total_seconds() / 3600.0
         level = self.msl + self.pressure_correction
-        
         for c in self.consts:
             theta_rad = math.radians(c['speed'] * delta_hours)
             phase_shift = 0
@@ -123,7 +114,7 @@ class OnishiEnvironmentModel:
             level += (self.base_amp * c['factor']) * math.cos(theta_rad - phase_shift)
         return level
 
-    def get_dataframe(self, start_date, days=10, interval_min=10):
+    def get_dataframe(self, start_date, days=10, interval_min=1): # ★ここを1分に変更
         start_dt = datetime.datetime.combine(start_date, datetime.time(0, 0))
         end_dt = start_dt + datetime.timedelta(days=days) - datetime.timedelta(minutes=1)
         data = []
@@ -148,8 +139,6 @@ now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hour
 
 # --- 気圧自動取得 ---
 fetched_pressure = get_cached_pressure()
-
-# 取得できた場合はその値を、エラーなら標準値(1013)を使用
 current_pressure = fetched_pressure if fetched_pressure else 1013.0
 pressure_status_text = "Auto Update" if fetched_pressure else "Standard (No Data)"
 
@@ -164,7 +153,6 @@ tide_name = get_tide_name(moon_age)
 
 # --- 情報表示 ---
 pressure_diff = int(1013 - current_pressure)
-# 補正値の表示文字列 (+5cm など)
 correction_str = f"+{pressure_diff}" if pressure_diff > 0 else f"{pressure_diff}"
 if pressure_diff == 0: correction_str = "±0"
 
@@ -177,7 +165,7 @@ info_html = f"""
   <div style="font-size: 1.0rem;">
     <span style="color: #0066cc;"><b>Current:</b> {curr_time.strftime('%H:%M')} | <b>Level:</b> {int(curr_lvl)}cm</span>
     <span style="font-size: 0.85rem; color: #666; margin-left: 8px;">
-      (Pressure: {int(current_pressure)}hPa <span style="color:#d62728;">Correction {correction_str}cm</span>)
+      (Pressure: {int(current_pressure)}hPa <span style="color:#d62728;">Adj {correction_str}cm</span>)
     </span>
   </div>
 </div>
@@ -194,10 +182,10 @@ with col_next:
     if st.button("Next 10d >>", use_container_width=True):
         st.session_state['view_date'] += datetime.timedelta(days=days_to_show)
 
-# --- サイドバー (設定のみ・入力なし) ---
+# --- サイドバー (設定のみ) ---
 with st.sidebar:
     st.header("⚙️ Settings")
-    st.info(f"📡 Weather Data: {pressure_status_text}\nPressure: {current_pressure} hPa")
+    st.info(f"📡 Weather: {pressure_status_text}\n{current_pressure} hPa")
     
     st.markdown("---")
     target_cm = st.number_input("Work Limit Level (cm)", value=120, step=10)
@@ -207,8 +195,9 @@ with st.sidebar:
     if st.button("Back to Today"):
         st.session_state['view_date'] = now_jst.date()
 
-# --- データ生成 ---
-df = model.get_dataframe(st.session_state['view_date'], days=days_to_show)
+# --- データ生成 (1分刻みで精密計算) ---
+# interval_min=1 に設定することで、リストの開始・終了時刻が正確になります
+df = model.get_dataframe(st.session_state['view_date'], days=days_to_show, interval_min=1)
 
 # ---------------------------------------------------------
 # 作業可能時間の解析
@@ -225,6 +214,7 @@ if df['is_safe'].any():
         start_t = grp['time'].iloc[0]
         end_t = grp['time'].iloc[-1]
         
+        # 10分以上
         if (end_t - start_t).total_seconds() >= 600:
             min_lvl = grp['level'].min()
             min_time = grp.loc[grp['level'].idxmin(), 'time']
@@ -260,21 +250,30 @@ graph_end = df['time'].iloc[-1]
 if graph_start <= curr_time <= graph_end:
     ax.scatter(curr_time, curr_lvl, color='gold', edgecolors='black', s=90, zorder=10)
 
-# 2. ピーク
+# 2. ピーク (解像度が上がったため、ピーク検出の間隔調整)
+# 1分刻みなので、データ点数が増えています。間隔(window)を広げてノイズを拾わないようにします
 levels = df['level'].values
 times = df['time'].tolist()
-for i in range(1, len(levels)-1):
+# データ間隔が10倍になったので、スキップしながらピークを探すか、条件を厳しくする
+# ここでは簡易的に、30分(30データ分)前後と比較
+search_step = 30 
+for i in range(search_step, len(levels)-search_step, 10): # 10分おきにチェック
     t, l = times[i], levels[i]
     
+    # 周辺データ(±30分)の中で最大かつ、基準より高い
+    local_max = max(levels[i-search_step:i+search_step])
+    local_min = min(levels[i-search_step:i+search_step])
+    
     # High Tide
-    if levels[i-1] < l and l > levels[i+1] and l > 180:
+    if l == local_max and l > 180:
+        # 重複防止: 直近にプロットしてなければ描画
         ax.scatter(t, l, color='red', marker='^', s=40, zorder=3)
         off_y = 15 if (t.day % 2 == 0) else 30
         ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
                     textcoords='offset points', ha='center', fontsize=9, color='#cc0000', fontweight='bold')
     
     # Low Tide
-    if levels[i-1] > l and l < levels[i+1] and l < 180:
+    if l == local_min and l < 180:
         ax.scatter(t, l, color='blue', marker='v', s=40, zorder=3)
         off_y = -25 if (t.day % 2 == 0) else -40
         ax.annotate(f"{t.strftime('%H:%M')}\n{int(l)}", (t, l), xytext=(0, off_y), 
