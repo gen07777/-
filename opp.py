@@ -92,12 +92,11 @@ class ConstructionTideModel:
         delta_hours = (target_dt - self.epoch_time).total_seconds() / 3600.0
         
         # 全潮回り対応の時刻補正
-        # 大西港は常に早い。小潮のときは特に早い。
         moon_age = get_moon_age(target_dt.date())
         # 変動係数: 大潮=0, 小潮=1
         phase_factor = (1 - math.cos(math.radians(moon_age * 12.0 * 2))) / 2
         
-        # 補正: 基本10分 + 変動分(最大20分) = 10~30分早める
+        # 補正: 基本10分 + 変動分(最大20分)
         shift_minutes = 10 + (20 * phase_factor)
         shift_hours = shift_minutes / 60.0
         
@@ -127,8 +126,6 @@ def deduplicate_peaks(df_peaks, min_dist_mins=60):
     if df_peaks.empty: return df_peaks
     keep = []
     last_time = None
-    # 潮位が高い順(満潮) or 低い順(干潮)でソートしてから選ぶと精度が良いが
-    # ここでは単純に時系列で離れているものを採用する
     for idx, row in df_peaks.iterrows():
         if last_time is None or (row['time'] - last_time).total_seconds()/60 > min_dist_mins:
             keep.append(idx)
@@ -205,16 +202,14 @@ if df['is_safe'].any():
                 "mt": min_t, "ml": min_l
             })
 
-# ピーク検出 (修正版: 間引きではなく、重複除去)
+# ピーク検出
 window = 120
 df['max'] = df['level'].rolling(window, center=True).max()
 df['min'] = df['level'].rolling(window, center=True).min()
 
-# 検出 (端のNaN対策でfillna使用)
 raw_highs = df[(df['level'] == df['max']) & (df['level'] > 180)].copy()
 raw_lows = df[(df['level'] == df['min']) & (df['level'] < 180)].copy()
 
-# 重複除去実行
 highs = deduplicate_peaks(raw_highs)
 lows = deduplicate_peaks(raw_lows)
 
@@ -226,4 +221,41 @@ ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='
 
 gs, ge = df['time'].iloc[0], df['time'].iloc[-1]
 if gs <= curr_time <= ge:
-    ax.scatter(curr_time, curr_lvl, c='gold', edgecolors='black
+    ax.scatter(curr_time, curr_lvl, c='gold', edgecolors='black', s=90, zorder=10)
+
+for _, r in highs.iterrows():
+    ax.scatter(r['time'], r['level'], c='red', marker='^', s=40, zorder=3)
+    off = 15 if r['time'].day%2==0 else 35
+    ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#cc0000', fontweight='bold')
+
+for _, r in lows.iterrows():
+    ax.scatter(r['time'], r['level'], c='blue', marker='v', s=40, zorder=3)
+    off = -25 if r['time'].day%2==0 else -45
+    ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#0000cc', fontweight='bold')
+
+for w in safe_windows:
+    ax.annotate(w['gl'], (w['mt'], w['ml']), xytext=(0,-85), textcoords='offset points', ha='center', fontsize=8, color='#b8860b', fontweight='bold', bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
+
+ax.set_ylabel("Level (cm)")
+ax.grid(True, ls=':', alpha=0.6)
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
+ax.set_ylim(bottom=-130)
+plt.tight_layout()
+st.pyplot(fig)
+
+# リスト
+st.markdown("---")
+use_print = st.checkbox("🖨️ Print Layout", False)
+st.markdown(f"##### 📋 Workable Time List (Limit <= {target_cm}cm)")
+
+if safe_windows:
+    rdf = pd.DataFrame(safe_windows)
+    cols = ["date", "start", "end", "dur"]
+    if use_print:
+        cc = st.columns(3)
+        for i, chk in enumerate(np.array_split(rdf, 3)):
+             if not chk.empty: cc[i].dataframe(chk[cols], hide_index=True)
+    else:
+        st.dataframe(rdf[cols], hide_index=True, use_container_width=True)
+else:
+    st.warning("No workable time found.")
