@@ -19,7 +19,6 @@ OWM_API_KEY = "f8b87c403597b305f1bbf48a3bdf8dcb"
 # ---------------------------------------------------------
 st.markdown("""
 <style>
-    /* ボタンを強制横並び & 高さ統一 */
     div.stButton > button { width: 100%; height: 3.0rem; font-size: 1rem; margin-top: 0px; }
     [data-testid="column"] { min-width: 0px !important; flex: 1 !important; }
     .block-container { padding-top: 1rem; padding-bottom: 2rem; }
@@ -71,10 +70,11 @@ def get_tide_name(moon_age):
     return "中潮 (Middle)"
 
 # ---------------------------------------------------------
-# 潮汐モデル (全潮回り対応 & 微調整)
+# 潮汐モデル (釣割・大西港基準チューニング)
 # ---------------------------------------------------------
 class ConstructionTideModel:
     def __init__(self, pressure_hpa):
+        # 基準: 釣割データ 2026/1/7 12:39 満潮 342cm
         self.epoch_time = datetime.datetime(2026, 1, 7, 12, 39)
         self.msl = 180.0
         self.pressure_correction = (1013.0 - pressure_hpa) * 1.0
@@ -85,24 +85,28 @@ class ConstructionTideModel:
             {'name':'S2', 'speed':30.000000, 'amp':0.46, 'phase':0},
             {'name':'K1', 'speed':15.041069, 'amp':0.38, 'phase':0},
             {'name':'O1', 'speed':13.943036, 'amp':0.28, 'phase':0},
-            {'name':'M4', 'speed':57.968208, 'amp':0.08, 'phase':90}
+            # M4分潮: phase=270 (-90) に設定することで「引き潮を早く、満ち潮を遅く」する
+            {'name':'M4', 'speed':57.968208, 'amp':0.10, 'phase':270} 
         ]
 
     def _calc_raw(self, target_dt):
         delta_hours = (target_dt - self.epoch_time).total_seconds() / 3600.0
         
-        # 全潮回り対応の時刻補正
+        # 時刻補正 (Time Lag)
+        # 釣割データに基づき、小潮時の遅れを再現
         moon_age = get_moon_age(target_dt.date())
-        # 変動係数: 大潮=0, 小潮=1
+        # 大潮(0)〜小潮(1)の係数
         phase_factor = (1 - math.cos(math.radians(moon_age * 12.0 * 2))) / 2
         
-        # 補正: 基本10分 + 変動分(最大20分)
-        shift_minutes = 10 + (20 * phase_factor)
+        # 補正: 基本0分 + 小潮時最大20分の「進み」補正（事象を早める）
+        # ※釣割データは標準より全体的に早いため
+        shift_minutes = 5 + (15 * phase_factor)
         shift_hours = shift_minutes / 60.0
         
         level = self.msl + self.pressure_correction
         for c in self.consts:
             theta_rad = math.radians(c['speed'] * (delta_hours + shift_hours) - c['phase'])
+            # 振幅係数調整
             level += (self.base_amp_factor * c['amp'] / 2.2) * math.cos(theta_rad)
         return level
 
@@ -135,7 +139,7 @@ def deduplicate_peaks(df_peaks, min_dist_mins=60):
 # ---------------------------------------------------------
 # UI
 # ---------------------------------------------------------
-st.markdown("<h5 style='margin-bottom:5px;'>⚓ Onishi Port Construction Tide</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='margin-bottom:5px;'>⚓ Onishi Port (Chowari Base)</h5>", unsafe_allow_html=True)
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
 
 current_pressure = get_current_pressure()
