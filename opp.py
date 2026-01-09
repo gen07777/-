@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import requests
 import numpy as np
-from scipy.interpolate import interp1d  # 滑らかなグラフを描くために追加
 
 # ---------------------------------------------------------
 # 1. アプリ設定 & 定数
@@ -151,22 +150,25 @@ class JMATideModel:
             
             curr += datetime.timedelta(days=1)
             
-        # データフレーム化
+        # データフレーム化 (毎時)
         df_hourly = pd.DataFrame({"time": timestamps, "level": levels})
         
-        # スプライン補間 (毎時 -> 毎分) で滑らかにする
-        # UNIXタイムスタンプにして補間
-        df_hourly['ts'] = df_hourly['time'].map(datetime.datetime.timestamp)
+        # Scipyを使わずにPandas標準機能で補間する (線形補間)
+        # まずTimeIndexを設定してリサンプリング
+        df_hourly = df_hourly.set_index('time')
         
-        # 補間関数作成 (cubic=3次スプライン)
-        f = interp1d(df_hourly['ts'], df_hourly['level'], kind='cubic', fill_value="extrapolate")
+        # 5分刻みのインデックスを作成
+        fine_index = pd.date_range(start=df_hourly.index[0], end=df_hourly.index[-1], freq='5T')
         
-        # 10分刻み(描画用) または 1分刻み(厳密計算用) のTimeIndexを作成
-        # ここでは描画パフォーマンスと精度のバランスで5分刻み
-        fine_index = pd.date_range(start=df_hourly['time'].iloc[0], end=df_hourly['time'].iloc[-1], freq='5T')
-        fine_levels = f(fine_index.map(datetime.datetime.timestamp))
+        # インデックスを結合して補間
+        df_fine = df_hourly.reindex(fine_index)
         
-        df_fine = pd.DataFrame({"time": fine_index, "level": fine_levels})
+        # 線形補間 (method='linear'はScipy不要)
+        df_fine['level'] = df_fine['level'].interpolate(method='linear')
+        
+        # インデックスを列に戻す
+        df_fine = df_fine.reset_index().rename(columns={'index': 'time'})
+        
         return df_fine
 
     def get_current_level(self, df_fine):
@@ -200,7 +202,7 @@ st.markdown("<h5 style='margin-bottom:5px;'>⚓ Onishi Port (Final Fixed)</h5>",
 current_pressure = get_current_pressure()
 model = JMATideModel(pressure_hpa=current_pressure, year=2026)
 
-# データ生成 (5日分で十分だがナビゲーション用に少し多めに)
+# データ生成 (5日分)
 df = model.get_dataframe(view_date, days=5)
 
 curr_time, curr_lvl = model.get_current_level(df)
