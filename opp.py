@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import requests
 import numpy as np
+import math
 
 # ---------------------------------------------------------
 # 1. アプリ設定 & 定数
@@ -12,15 +13,10 @@ import numpy as np
 st.set_page_config(layout="wide", page_title="Onishi Port Precision Tide")
 OWM_API_KEY = "f8b87c403597b305f1bbf48a3bdf8dcb"
 
-# 大西港 (大崎上島) 補正定数 (検証済み)
+# 大西港 (大崎上島) 補正定数
 TIME_OFFSET_MIN = 1       # 時間補正 +1分
 LEVEL_BASE_OFFSET = 13    # 基準面補正 +13cm
 STANDARD_PRESSURE = 1013  # 標準気圧
-
-# バックアップデータ (気象庁接続エラー時用: 1月9日前後)
-BACKUP_HOURLY = [
-    230, 275, 290, 265, 210, 140, 70, 30, 40, 100, 180, 260, 315, 330, 300, 240, 170, 110, 80, 85, 130, 190, 250, 290
-]
 
 # ---------------------------------------------------------
 # 2. レイアウト & スタイル
@@ -78,7 +74,45 @@ def fetch_jma_data_map(year):
     return data_map
 
 # ---------------------------------------------------------
-# 4. ヘルパー関数 (月齢・潮名・ピーク処理)
+# 4. 数学的補間ロジック (Scipy不要の滑らか補間)
+# ---------------------------------------------------------
+def cosine_interpolate(y1, y2, mu):
+    """コサイン補間: 直線ではなく波のように滑らかにつなぐ"""
+    mu2 = (1 - math.cos(mu * math.pi)) / 2
+    return (y1 * (1 - mu2) + y2 * mu2)
+
+def generate_smooth_curve(timestamps, hourly_levels, interval_minutes=5):
+    """毎時のデータをコサイン補間で分単位に滑らかにする"""
+    smooth_times = []
+    smooth_levels = []
+    
+    # データポイント間を補間
+    for i in range(len(timestamps) - 1):
+        t_start = timestamps[i]
+        t_end = timestamps[i+1]
+        y_start = hourly_levels[i]
+        y_end = hourly_levels[i+1]
+        
+        # 間隔ごとのステップ数
+        steps = int((t_end - t_start).total_seconds() / 60 / interval_minutes)
+        if steps == 0: steps = 1
+        
+        for s in range(steps):
+            mu = s / steps
+            interp_y = cosine_interpolate(y_start, y_end, mu)
+            interp_t = t_start + datetime.timedelta(minutes=s*interval_minutes)
+            
+            smooth_times.append(interp_t)
+            smooth_levels.append(interp_y)
+            
+    # 最後の点を追加
+    smooth_times.append(timestamps[-1])
+    smooth_levels.append(hourly_levels[-1])
+    
+    return pd.DataFrame({"time": smooth_times, "level": smooth_levels})
+
+# ---------------------------------------------------------
+# 5. ヘルパー関数
 # ---------------------------------------------------------
 def get_moon_age(date_obj):
     base = datetime.date(2000, 1, 6)
@@ -105,7 +139,7 @@ def deduplicate_peaks(df_peaks, min_dist_mins=60):
     return df_peaks.loc[keep]
 
 # ---------------------------------------------------------
-# 5. 新・潮汐モデル (JMAデータ補間 + 補正)
+# 6. 新・潮汐モデル (データ生成部)
 # ---------------------------------------------------------
 class JMATideModel:
     def __init__(self, pressure_hpa, year=2026):
@@ -114,89 +148,86 @@ class JMATideModel:
         self.total_level_offset = LEVEL_BASE_OFFSET + self.pressure_correction
         self.time_offset = TIME_OFFSET_MIN
     
+    def get_backup_level(self, dt):
+        """
+        データがない場合のデモ用: 数式で潮位を生成する（だから滑らか）
+        基準: 平均180cm, 振幅140cm, 周期約12.4時間
+        """
+        # 基準時刻からの経過時間(時間単位)
+        epoch = datetime.datetime(2026, 1, 1, 0, 0)
+        delta_h = (dt - epoch).total_seconds() / 3600.0
+        
+        # 簡易調和分解モデル (M2 + K1相当)
+        # これにより、データ切れでも「不自然な段差」が絶対に発生しない
+        level = 180 
+        level += 110 * math.cos(2 * math.pi * delta_h / 12.42 - 1.0) # 半日周潮
+        level += 40 * math.cos(2 * math.pi * delta_h / 24.0 - 2.0)   # 日周潮
+        return int(level)
+
     def get_dataframe(self, start_date, days=10):
-        # 指定期間の毎時データを作成
-        timestamps = []
-        levels = []
+        # 1. まず「毎時」のデータポイントを作る
+        timestamps_hourly = []
+        levels_hourly = []
         
         start_dt = datetime.datetime.combine(start_date, datetime.time(0, 0))
         end_dt = start_dt + datetime.timedelta(days=days)
         
-        # 必要な日数分ループ
         curr = start_dt
-        while curr < end_dt:
+        while curr <= end_dt: # 最後の時間まで含める
             d_str = curr.strftime("%Y-%m-%d")
+            hour = curr.hour
             
-            # データ取得 (なければバックアップを回転させて擬似生成)
+            val = None
+            # A. 気象庁データがある場合
             if d_str in self.jma_map:
-                hourly = self.jma_map[d_str]
-            else:
-                # バックアップロジック (デモ用)
-                diff = (curr.date() - datetime.date(2026,1,9)).days
-                shift = diff * 1 
-                l_len = len(BACKUP_HOURLY)
-                hourly = [BACKUP_HOURLY[(i - shift) % l_len] for i in range(l_len)]
-
-            # 補正適用 (潮位オフセット)
-            corrected_hourly = [h + self.total_level_offset for h in hourly]
+                try:
+                    val = self.jma_map[d_str][hour]
+                except:
+                    pass
             
-            # タイムスタンプ生成 (時間オフセット適用)
-            # 竹原の0時データ -> 大西の0時01分データとして扱う
-            base_time = datetime.datetime.combine(curr.date(), datetime.time(0,0))
-            for h in range(24):
-                t = base_time + datetime.timedelta(hours=h, minutes=self.time_offset)
-                timestamps.append(t)
-                levels.append(corrected_hourly[h])
+            # B. ない場合 (バックアップ数式を使用)
+            if val is None:
+                val = self.get_backup_level(curr)
             
-            curr += datetime.timedelta(days=1)
+            # 補正適用
+            final_val = val + self.total_level_offset
             
-        # データフレーム化 (毎時)
-        df_hourly = pd.DataFrame({"time": timestamps, "level": levels})
+            # 時間適用 (竹原データ + 1分)
+            t_point = curr + datetime.timedelta(minutes=self.time_offset)
+            
+            timestamps_hourly.append(t_point)
+            levels_hourly.append(final_val)
+            
+            curr += datetime.timedelta(hours=1)
+            
+        # 2. 毎時のデータを「コサイン補間」で滑らかにつなぐ
+        df_smooth = generate_smooth_curve(timestamps_hourly, levels_hourly, interval_minutes=5)
         
-        # Scipyを使わずにPandas標準機能で補間する (線形補間)
-        # まずTimeIndexを設定してリサンプリング
-        df_hourly = df_hourly.set_index('time')
-        
-        # 5分刻みのインデックスを作成
-        fine_index = pd.date_range(start=df_hourly.index[0], end=df_hourly.index[-1], freq='5T')
-        
-        # インデックスを結合して補間
-        df_fine = df_hourly.reindex(fine_index)
-        
-        # 線形補間 (method='linear'はScipy不要)
-        df_fine['level'] = df_fine['level'].interpolate(method='linear')
-        
-        # インデックスを列に戻す
-        df_fine = df_fine.reset_index().rename(columns={'index': 'time'})
-        
-        return df_fine
+        return df_smooth
 
     def get_current_level(self, df_fine):
-        # 現在時刻に最も近いデータをdfから取得
         now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
         now_naive = now_jst.replace(tzinfo=None)
         
-        # 未来・過去すぎる場合はNone
-        if now_naive < df_fine['time'].iloc[0] or now_naive > df_fine['time'].iloc[-1]:
-            return now_naive, 0
+        if df_fine.empty or now_naive < df_fine['time'].iloc[0] or now_naive > df_fine['time'].iloc[-1]:
+            # 範囲外なら数式で算出
+            return now_naive, self.get_backup_level(now_naive) + self.total_level_offset
             
-        # 近似検索
         idx = (df_fine['time'] - now_naive).abs().idxmin()
         return now_naive, df_fine.loc[idx, 'level']
 
 # ---------------------------------------------------------
-# 6. メイン処理 & UI
+# 7. メイン処理 & UI
 # ---------------------------------------------------------
 if 'view_date' not in st.session_state:
     now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-    # デモ用に初期表示を2026年にする
     if now_jst.year != 2026:
         st.session_state['view_date'] = datetime.date(2026, 1, 9)
     else:
         st.session_state['view_date'] = now_jst.date()
 
 view_date = st.session_state['view_date']
-st.markdown("<h5 style='margin-bottom:5px;'>⚓ Onishi Port (Final Fixed)</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='margin-bottom:5px;'>⚓ Onishi Port (Smoothed)</h5>", unsafe_allow_html=True)
 
 # データ準備
 current_pressure = get_current_pressure()
@@ -249,41 +280,49 @@ df['is_safe'] = (df['level'] <= target_cm) & (df['hour'] >= start_h) & (df['hour
 # 作業可能時間の抽出
 safe_windows = []
 if df['is_safe'].any():
-    # 連続区間のグルーピング
     df['grp'] = (df['is_safe'] != df['is_safe'].shift()).cumsum()
     for _, g in df[df['is_safe']].groupby('grp'):
         s, e = g['time'].iloc[0], g['time'].iloc[-1]
         
-        # 10分以上を作業時間とみなす
         if (e-s).total_seconds() >= 600:
             min_l = g['level'].min()
             min_t = g.loc[g['level'].idxmin(), 'time']
             d = e - s
             h, m = d.seconds//3600, (d.seconds%3600)//60
             
-            # リスト表示用データ
             safe_windows.append({
                 "date": s.strftime('%m/%d(%a)'),
                 "start": s.strftime("%H:%M"),
                 "end": e.strftime("%H:%M"),
                 "dur": f"{h}:{m:02}",
-                "gl": f"Work\n{h}:{m:02}", # グラフ注釈用
+                "gl": f"Work\n{h}:{m:02}",
                 "mt": min_t, "ml": min_l
             })
 
-# ピーク検出 (極大・極小)
-# 補間データなので rolling を使うより、単純な近傍比較が有効
-df['peak_high'] = (df['level'] > df['level'].shift(1)) & (df['level'] > df['level'].shift(-1))
-df['peak_low'] = (df['level'] < df['level'].shift(1)) & (df['level'] < df['level'].shift(-1))
+# ピーク検出 (極大・極小) - 近傍探索
+# 補間データなので単純比較でOK
+# ノイズ除去のため少し間引く
+peak_window = 12 # 5分間隔x12 = 60分以内の極値を探す
+df['is_high'] = False
+df['is_low'] = False
 
-highs = df[df['peak_high']].copy()
-lows = df[df['peak_low']].copy()
+# 簡易的なピーク検出ロジック (Scipy find_peaksなし)
+levels = df['level'].values
+for i in range(peak_window, len(levels)-peak_window):
+    window = levels[i-peak_window : i+peak_window+1]
+    center = levels[i]
+    if center == np.max(window) and center > 150: # 満潮閾値
+        df.at[i, 'is_high'] = True
+    if center == np.min(window) and center < 250: # 干潮閾値
+        df.at[i, 'is_low'] = True
 
+highs = df[df['is_high']].copy()
+lows = df[df['is_low']].copy()
 highs = deduplicate_peaks(highs)
 lows = deduplicate_peaks(lows)
 
 # ---------------------------------------------------------
-# 7. グラフ描画 (Matplotlib)
+# 8. グラフ描画 (Matplotlib)
 # ---------------------------------------------------------
 fig, ax = plt.subplots(figsize=(10, 5))
 
@@ -296,7 +335,7 @@ ax.axhline(target_cm, c='orange', ls='--', lw=1.5, label='Limit')
 # 作業可能エリアの塗りつぶし
 ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4)
 
-# 現在位置のポイント
+# 現在位置
 gs, ge = df['time'].iloc[0], df['time'].iloc[-1]
 if gs <= curr_time <= ge:
     ax.scatter(curr_time, curr_lvl, c='gold', edgecolors='black', s=90, zorder=10, label="Now")
@@ -304,7 +343,6 @@ if gs <= curr_time <= ge:
 # 満潮 (赤 ▲)
 for _, r in highs.iterrows():
     ax.scatter(r['time'], r['level'], c='red', marker='^', s=40, zorder=3)
-    # 日付ごとに高さを互い違いにして重なり防止
     off = 15 if r['time'].day % 2 == 0 else 35
     ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", 
                 (r['time'], r['level']), xytext=(0,off), textcoords='offset points', 
@@ -318,24 +356,25 @@ for _, r in lows.iterrows():
                 (r['time'], r['level']), xytext=(0,off), textcoords='offset points', 
                 ha='center', fontsize=8, color='#0000cc', fontweight='bold')
 
-# 作業時間の注釈 (Work X:XX)
+# 作業時間の注釈
 for w in safe_windows:
-    # グラフが混み合うので、最も潮位が低いポイントにラベルを表示
     ax.annotate(w['gl'], (w['mt'], w['ml']), xytext=(0,-85), textcoords='offset points', 
                 ha='center', fontsize=8, color='#b8860b', fontweight='bold', 
                 bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
 
 ax.set_ylabel("Level (cm)")
 ax.grid(True, ls=':', alpha=0.6)
-# X軸フォーマット
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-ax.set_ylim(bottom=-50) # 干潮がマイナスになることもあるので余裕をもたせる
-plt.tight_layout()
 
+# Y軸のマージン調整 (グラフが見切れないように)
+y_min, y_max = df['level'].min(), df['level'].max()
+ax.set_ylim(bottom=y_min - 20, top=y_max + 50) 
+
+plt.tight_layout()
 st.pyplot(fig)
 
 # ---------------------------------------------------------
-# 8. 作業時間リスト
+# 9. 作業時間リスト
 # ---------------------------------------------------------
 st.markdown("---")
 st.markdown(f"##### 📋 Workable Time List (Limit <= {target_cm}cm)")
@@ -343,8 +382,6 @@ st.markdown(f"##### 📋 Workable Time List (Limit <= {target_cm}cm)")
 if safe_windows:
     rdf = pd.DataFrame(safe_windows)
     cols = ["date", "start", "end", "dur"]
-    
-    # スマートフォンでも見やすいようにカード形式に近い表示か、分割表示
     cc = st.columns(3)
     chunks = np.array_split(rdf, 3)
     for i, col in enumerate(cc):
