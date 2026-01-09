@@ -15,7 +15,7 @@ st.set_page_config(layout="wide", page_title="Onishi Port Precision Tide")
 OWM_API_KEY = "f8b87c403597b305f1bbf48a3bdf8dcb"
 
 # ---------------------------------------------------------
-# スタイル設定
+# レイアウト & フォント
 # ---------------------------------------------------------
 st.markdown("""
 <style>
@@ -70,69 +70,71 @@ def get_tide_name(moon_age):
     return "中潮 (Middle)"
 
 # ---------------------------------------------------------
-# 精密潮汐モデル (日潮不等 & 可変引き潮対応)
+# 精密潮汐モデル (季節補正 & 小満潮調整入り)
 # ---------------------------------------------------------
 class PrecisionTideModel:
-    def __init__(self, pressure_hpa):
+    def __init__(self, pressure_hpa, target_date):
         # 基準: 釣割データ 2026/1/7 12:39 満潮 342cm
-        # ★補正: 全体的に20分進める(epochを早める)ことで、遅れを解消
-        self.epoch_time = datetime.datetime(2026, 1, 7, 12, 19) 
-        self.msl = 180.0
+        self.epoch_time = datetime.datetime(2026, 1, 7, 12, 19) # 時間ズレ微調整済み
+        self.base_msl = 180.0
+        
+        # 1. 気圧補正 (1hPa = 1cm)
         self.pressure_correction = (1013.0 - pressure_hpa) * 1.0
+        
+        # 2. 季節別平均水面補正 (Seasonal MSL)
+        # 瀬戸内海は夏秋が高く、冬春が低い。
+        # 1月:-10cm, 8月:+20cm 程度の変動がある。
+        month = target_date.month
+        if month in [12, 1, 2, 3]:
+            self.seasonal_offset = -10.0 # 冬〜春は低い
+        elif month in [4, 5, 11]:
+            self.seasonal_offset = 0.0   # 中間
+        else:
+            self.seasonal_offset = 15.0  # 夏〜秋は高い(膨張)
+            
+        # 3. 振幅基準
         self.base_amp_factor = (342.0 - 180.0) / 1.0
 
-        # 主要分潮
+        # 4. 分潮パラメータ
+        # K1, O1の係数を少し下げて(0.38->0.32, 0.28->0.24)、小さい満潮が低くなりすぎるのを防ぐ
         self.consts = [
             {'name':'M2', 'speed':28.984104, 'amp':1.00, 'phase':0},
             {'name':'S2', 'speed':30.000000, 'amp':0.46, 'phase':0},
-            {'name':'K1', 'speed':15.041069, 'amp':0.38, 'phase':0},
-            {'name':'O1', 'speed':13.943036, 'amp':0.28, 'phase':0},
-            # M4: 浅海分潮（平均的な歪み）
-            {'name':'M4', 'speed':57.968208, 'amp':0.08, 'phase':270}
+            {'name':'K1', 'speed':15.041069, 'amp':0.32, 'phase':0}, # 調整
+            {'name':'O1', 'speed':13.943036, 'amp':0.24, 'phase':0}, # 調整
+            {'name':'M4', 'speed':57.968208, 'amp':0.10, 'phase':270} # 引き潮加速
         ]
 
     def _calc_raw(self, target_dt):
         delta_hours = (target_dt - self.epoch_time).total_seconds() / 3600.0
         
-        # 1. 基本潮位の計算
-        level = self.msl + self.pressure_correction
-        
-        # 月齢による全体シフト（小潮の遅れ補正）
+        # 時刻シフト (小潮の遅れ補正)
         moon_age = get_moon_age(target_dt.date())
-        # 小潮(月齢7-9, 22-24)付近のみ、少し時間を遅らせてバランスを取る
-        neap_delay_factor = (1 - math.cos(math.radians(moon_age * 12.0 * 2))) / 2
-        # 基本は0分遅れ、小潮時は最大15分遅れ
-        time_lag_hours = (15 * neap_delay_factor) / 60.0
-
-        current_delta = delta_hours - time_lag_hours
+        phase_factor = (1 - math.cos(math.radians(moon_age * 12.0 * 2))) / 2
+        shift_minutes = 5 + (15 * phase_factor)
+        shift_hours = shift_minutes / 60.0
         
-        # 2. 分潮合成
-        base_wave = 0
-        diurnal_wave = 0 # 日周潮(K1+O1)成分
+        # 合計水位 = 基準MSL + 気圧補正 + 季節補正 + 潮汐波
+        level = self.base_msl + self.pressure_correction + self.seasonal_offset
         
+        # 波の合成
+        diurnal_wave = 0
         for c in self.consts:
-            theta_rad = math.radians(c['speed'] * current_delta - c['phase'])
-            component = (self.base_amp_factor * c['amp'] / 2.2) * math.cos(theta_rad)
+            theta_rad = math.radians(c['speed'] * (delta_hours + shift_hours) - c['phase'])
+            component = (self.base_amp_factor * c['amp'] / 2.05) * math.cos(theta_rad) # 係数再調整
             level += component
-            
-            # 日周潮成分(1日1回の波)の強さを記録しておく
             if c['name'] in ['K1', 'O1']:
                 diurnal_wave += component
 
-        # 3. 【新機能】動的引き潮加速 (Dynamic Ebb Acceleration)
-        # 日周潮がプラス（＝高い満潮を作っている時）は、その後の引きをさらに強化する
-        # これにより「高い満潮の後は、ストンと落ちる」を再現
-        
-        # M2(半日周潮)の位相を取得
+        # 動的引き潮加速 (大きい満潮の後だけガクッと下げる)
         m2 = next(c for c in self.consts if c['name'] == 'M2')
-        m2_theta = math.radians(m2['speed'] * current_delta - m2['phase'])
+        m2_theta = math.radians(m2['speed'] * (delta_hours + shift_hours) - m2['phase'])
         
-        # M2が下がり坂(sinがマイナス) かつ 日周潮が強い場合、水位を下げる補正を加える
-        # これが「大きい満潮の後の急な引き」を作る隠し味
-        if math.sin(m2_theta) > 0: # 引き潮の局面
-            # 日周潮の高さに応じて、さらに水位を押し下げる(加速させる)
-            extra_ebb = diurnal_wave * 0.15 * math.sin(m2_theta)
-            level -= extra_ebb
+        if math.sin(m2_theta) > 0: # 引き潮時
+             # 日周潮成分がプラス（＝今日の潮位が高い方の満潮）のときだけ、引きを加速
+             if diurnal_wave > 0:
+                extra_ebb = diurnal_wave * 0.2 * math.sin(m2_theta)
+                level -= extra_ebb
 
         return level
 
@@ -165,14 +167,15 @@ def deduplicate_peaks(df_peaks, min_dist_mins=60):
 # ---------------------------------------------------------
 # UI
 # ---------------------------------------------------------
-st.markdown("<h5 style='margin-bottom:5px;'>⚓ Onishi Port (Precision Model)</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='margin-bottom:5px;'>⚓ Onishi Port (Final Fixed)</h5>", unsafe_allow_html=True)
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+view_date = st.session_state['view_date']
 
 current_pressure = get_current_pressure()
-model = PrecisionTideModel(pressure_hpa=current_pressure)
+# モデル生成時に日付を渡して季節補正を適用
+model = PrecisionTideModel(pressure_hpa=current_pressure, target_date=view_date)
 curr_time, curr_lvl = model.get_current_level()
 
-view_date = st.session_state['view_date']
 ma = get_moon_age(view_date)
 tn = get_tide_name(ma)
 
@@ -180,13 +183,18 @@ tn = get_tide_name(ma)
 p_diff = int(1013 - current_pressure)
 adj_txt = f"+{p_diff}" if p_diff > 0 else f"{p_diff}"
 if p_diff == 0: adj_txt = "0"
+# 季節補正値の表示
+season_off = int(model.seasonal_offset)
+season_txt = f"+{season_off}" if season_off > 0 else f"{season_off}"
 
 st.markdown(f"""
 <div style="font-size:0.85rem; background:#f8f9fa; padding:8px; border:1px solid #ddd; margin-bottom:5px; border-radius:4px;">
  <div><b>Period:</b> {view_date.strftime('%m/%d')}~ <span style="color:#555;">(Moon:{ma:.1f} {tn})</span></div>
  <div style="margin-top:2px;">
    <span style="color:#0066cc; font-weight:bold;">Now: {curr_time.strftime('%H:%M')} {int(curr_lvl)}cm</span>
-   <span style="font-size:0.75rem; color:#666; margin-left:5px;">(Press:{int(current_pressure)}hPa <span style="color:#d62728;">Adj:{adj_txt}cm</span>)</span>
+   <span style="font-size:0.75rem; color:#666; margin-left:5px;">
+    (Press:{int(current_pressure)}hPa <span style="color:#d62728;">Adj:{adj_txt}cm</span>, Season:<span style="color:#2ca02c;">{season_txt}cm</span>)
+   </span>
  </div>
 </div>
 """, unsafe_allow_html=True)
@@ -280,8 +288,6 @@ st.markdown(f"##### 📋 Workable Time List (Limit <= {target_cm}cm)")
 if safe_windows:
     rdf = pd.DataFrame(safe_windows)
     cols = ["date", "start", "end", "dur"]
-    
-    # 3列分割表示(PC用) / スマホは自動縦並び
     cc = st.columns(3)
     chunks = np.array_split(rdf, 3)
     for i, col in enumerate(cc):
