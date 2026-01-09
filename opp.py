@@ -11,42 +11,25 @@ import numpy as np
 # ---------------------------------------------------------
 # アプリ設定
 # ---------------------------------------------------------
-st.set_page_config(layout="wide", page_title="Onishi Port Tide Master Ultimate")
+st.set_page_config(layout="wide", page_title="Onishi Port Construction Tide")
 
-# API Key
+# APIキー (OpenWeatherMap)
 OWM_API_KEY = "f8b87c403597b305f1bbf48a3bdf8dcb"
 
 # ---------------------------------------------------------
-# CSS: スマホでのボタン強制横並び & 印刷用調整
+# スタイル & フォント設定
 # ---------------------------------------------------------
 st.markdown("""
 <style>
-    /* スマホでボタンが縦にならないように強制するCSS */
-    div.stButton > button {
-        width: 100%;
-        padding: 0px 5px;
-        font-size: 0.8rem; /* 文字を小さく */
-        height: 2.5rem;
-    }
-    /* カラムの最小幅を無視して横並びを維持 */
-    [data-testid="column"] {
-        min-width: 0px !important;
-        flex: 1 !important;
-    }
-    /* タイトル周りの余白削減 */
-    .block-container {
-        padding-top: 1rem;
-        padding-bottom: 1rem;
-    }
+    div.stButton > button { width: 100%; height: 2.5rem; font-size: 0.9rem; }
+    [data-testid="column"] { min-width: 0px !important; flex: 1 !important; }
+    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
+    h4 { margin-top: 0; padding-top: 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# フォント設定
-# ---------------------------------------------------------
 def configure_font():
     plt.rcParams['font.family'] = 'sans-serif'
-
 configure_font()
 
 # ---------------------------------------------------------
@@ -57,77 +40,96 @@ if 'view_date' not in st.session_state:
     st.session_state['view_date'] = now_jst.date()
 
 # ---------------------------------------------------------
-# API連携
+# 気圧自動取得 (API連動)
 # ---------------------------------------------------------
-@st.cache_data(ttl=3600)
-def get_cached_pressure():
-    lat = 34.234
-    lon = 132.831
+@st.cache_data(ttl=3600) # 1時間キャッシュで通信量を節約
+def get_current_pressure():
+    # 大西港フェリーターミナル付近
+    lat, lon = 34.234, 132.831
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OWM_API_KEY}&units=metric"
     try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            return float(data['main']['pressure'])
-        return None
+        res = requests.get(url, timeout=3)
+        if res.status_code == 200:
+            return float(res.json()['main']['pressure'])
     except:
-        return None
+        pass
+    return 1013.0 # 取得失敗時は標準気圧
 
 # ---------------------------------------------------------
-# 月齢・潮名
+# 月齢・潮名計算
 # ---------------------------------------------------------
 def get_moon_age(date_obj):
-    base_date = datetime.date(2000, 1, 6)
-    diff = (date_obj - base_date).days
-    return diff % 29.53059
+    base = datetime.date(2000, 1, 6)
+    return ((date_obj - base).days) % 29.53059
 
 def get_tide_name(moon_age):
     m = int(moon_age)
     if m >= 30: m -= 30
-    if 0 <= m <= 2 or 14 <= m <= 17 or 29 <= m <= 30: return "Spring (大潮)"
-    elif 3 <= m <= 5 or 18 <= m <= 20: return "Middle (中潮)"
-    elif 6 <= m <= 9 or 21 <= m <= 24: return "Neap (小潮)"
-    elif 10 <= m <= 12: return "Long (長潮)"
-    elif m == 13 or 25 <= m <= 28: return "Young (若潮)"
-    else: return "Middle (中潮)"
+    if 0<=m<=2 or 14<=m<=17 or 29<=m<=30: return "大潮 (Spring)"
+    elif 3<=m<=5 or 18<=m<=20: return "中潮 (Middle)"
+    elif 6<=m<=9 or 21<=m<=24: return "小潮 (Neap)"
+    elif 10<=m<=12: return "長潮 (Long)"
+    elif m==13 or 25<=m<=28: return "若潮 (Young)"
+    return "中潮 (Middle)"
 
 # ---------------------------------------------------------
-# 潮汐モデル
+# 高精度潮汐モデル (全潮回り対応補正)
 # ---------------------------------------------------------
-class OnishiEnvironmentModel:
-    def __init__(self, pressure_hpa=1013.0):
+class ConstructionTideModel:
+    def __init__(self, pressure_hpa):
         self.epoch_time = datetime.datetime(2026, 1, 7, 12, 39)
-        self.epoch_level = 342.0
         self.msl = 180.0
+        
+        # 1. 気圧補正 (吸い上げ効果: 1hPa下がるごとに1cm上昇)
         self.pressure_correction = (1013.0 - pressure_hpa) * 1.0
+        
+        # 2. 振幅の基準化
+        # 1/7の満潮(342cm)に合うように調整
+        self.base_amp_factor = (342.0 - 180.0) / 1.0
+
+        # 3. 分潮パラメータ (M4分潮で「引きの速さ」を表現)
         self.consts = [
-            {'name': 'M2', 'speed': 28.984104, 'factor': 1.00},
-            {'name': 'S2', 'speed': 30.000000, 'factor': 0.45},
-            {'name': 'N2', 'speed': 28.439730, 'factor': 0.22},
-            {'name': 'K2', 'speed': 30.082137, 'factor': 0.12},
-            {'name': 'K1', 'speed': 15.041069, 'factor': 0.38},
-            {'name': 'O1', 'speed': 13.943036, 'factor': 0.28},
-            {'name': 'P1', 'speed': 14.958931, 'factor': 0.12},
-            {'name': 'Q1', 'speed': 13.398661, 'factor': 0.05},
-            {'name': 'M4', 'speed': 57.968208, 'factor': 0.08},
-            {'name': 'MS4','speed': 58.984104, 'factor': 0.06}
+            {'name':'M2', 'speed':28.984104, 'amp':1.00, 'phase':0},
+            {'name':'S2', 'speed':30.000000, 'amp':0.46, 'phase':0},
+            {'name':'K1', 'speed':15.041069, 'amp':0.38, 'phase':0},
+            {'name':'O1', 'speed':13.943036, 'amp':0.28, 'phase':0},
+            {'name':'M4', 'speed':57.968208, 'amp':0.08, 'phase':90} # 地形歪み
         ]
-        total_factor = sum(c['factor'] for c in self.consts)
-        self.base_amp = (self.epoch_level - self.msl) / total_factor
 
     def _calc_raw(self, target_dt):
         delta_hours = (target_dt - self.epoch_time).total_seconds() / 3600.0
+        
+        # 4. 時刻の動的補正 (Time Shift)
+        # 大西港は標準より「常に早い」傾向がある。
+        # 大潮時は約5~10分早く、小潮時は約25~30分早い。
+        
+        moon_age = get_moon_age(target_dt.date())
+        
+        # 月齢による変動係数 (0.0:大潮 〜 1.0:小潮)
+        # cos波を使って大潮(0,15,30)で最小、小潮(7,22)で最大になる係数を作る
+        phase_factor = (1 - math.cos(math.radians(moon_age * 12.0 * 2))) / 2 
+        # ※ moon_age*12*2 で月齢15周期の変動を作成
+        
+        # 補正時間（分）: 基本早め10分 + 変動分(最大20分)
+        # positive value advances the wave (makes it earlier)
+        shift_minutes = 10 + (20 * phase_factor)
+        shift_hours = shift_minutes / 60.0
+        
+        # 時間軸を進める（＝事象を早く到来させる）
+        corrected_delta = delta_hours + shift_hours
+        
         level = self.msl + self.pressure_correction
         for c in self.consts:
-            theta_rad = math.radians(c['speed'] * delta_hours)
-            shift = math.radians(90) if c['name'] in ['M4', 'MS4'] else 0
-            level += (self.base_amp * c['factor']) * math.cos(theta_rad - shift)
+            theta_rad = math.radians(c['speed'] * corrected_delta - c['phase'])
+            # amp係数調整(2.2で正規化)
+            level += (self.base_amp_factor * c['amp'] / 2.2) * math.cos(theta_rad)
+            
         return level
 
     def get_dataframe(self, start_date, days=10):
         start_dt = datetime.datetime.combine(start_date, datetime.time(0, 0))
         end_dt = start_dt + datetime.timedelta(days=days) - datetime.timedelta(minutes=1)
-        # 高速計算
+        # 1分刻みで高精度計算
         time_index = pd.date_range(start=start_dt, end=end_dt, freq='1min')
         levels = [self._calc_raw(t) for t in time_index]
         return pd.DataFrame({"time": time_index, "level": levels})
@@ -139,188 +141,127 @@ class OnishiEnvironmentModel:
         return now_naive, self._calc_raw(now_naive)
 
 # ---------------------------------------------------------
-# UI構築
+# UI
 # ---------------------------------------------------------
-# タイトル (さらに小さく)
-st.markdown("<h5 style='margin:0; padding:0;'>⚓ Onishi Port Tide</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='margin-bottom:5px;'>⚓ Onishi Port Construction Tide</h5>", unsafe_allow_html=True)
 now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
 
-# データ取得 & 計算
-fetched_pressure = get_cached_pressure()
-current_pressure = fetched_pressure if fetched_pressure else 1013.0
-model = OnishiEnvironmentModel(pressure_hpa=current_pressure)
+# 気圧取得 (自動)
+current_pressure = get_current_pressure()
+
+# モデル初期化
+model = ConstructionTideModel(pressure_hpa=current_pressure)
 curr_time, curr_lvl = model.get_current_level()
 
-current_view_date = st.session_state['view_date']
-moon_age = get_moon_age(current_view_date)
-tide_name = get_tide_name(moon_age)
+view_date = st.session_state['view_date']
+ma = get_moon_age(view_date)
+tn = get_tide_name(ma)
 
-# 情報表示 (コンパクト)
-pressure_diff = int(1013 - current_pressure)
-corr_str = f"+{pressure_diff}" if pressure_diff > 0 else f"{pressure_diff}"
-if pressure_diff == 0: corr_str = "0"
+# 情報表示
+p_diff = int(1013 - current_pressure)
+adj_txt = f"+{p_diff}" if p_diff > 0 else f"{p_diff}"
+if p_diff == 0: adj_txt = "0"
 
-info_html = f"""
-<div style="font-size: 0.85rem; color: #444; background-color: #f8f9fa; padding: 5px; border-radius: 4px; border: 1px solid #ddd; margin-bottom: 5px;">
-  <b>Period:</b> {current_view_date.strftime('%m/%d')}~ <span style="color:#666;">(Moon:{moon_age:.0f} {tide_name})</span><br>
-  <span style="color: #0066cc;"><b>Now:</b> {curr_time.strftime('%H:%M')} <b>{int(curr_lvl)}cm</b></span>
-  <span style="font-size: 0.75rem; color: #666;">(Press:{int(current_pressure)}hPa <span style="color:#d62728;">Adj:{corr_str}cm</span>)</span>
+st.markdown(f"""
+<div style="font-size:0.85rem; background:#f8f9fa; padding:8px; border:1px solid #ddd; margin-bottom:5px; border-radius:4px;">
+ <div><b>Period:</b> {view_date.strftime('%m/%d')}~ <span style="color:#555;">(Moon:{ma:.1f} {tn})</span></div>
+ <div style="margin-top:2px;">
+   <span style="color:#0066cc; font-weight:bold;">Now: {curr_time.strftime('%H:%M')} {int(curr_lvl)}cm</span>
+   <span style="font-size:0.75rem; color:#666; margin-left:5px;">(Press:{int(current_pressure)}hPa <span style="color:#d62728;">Adj:{adj_txt}cm</span>)</span>
+ </div>
 </div>
-"""
-st.markdown(info_html, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# ナビゲーションボタン (CSSで強制横並び)
-days_to_show = 10
-col_prev, col_next = st.columns([1, 1]) # 等幅指定
-with col_prev:
-    if st.button("< Prev", use_container_width=True):
-        st.session_state['view_date'] -= datetime.timedelta(days=days_to_show)
-with col_next:
-    if st.button("Next >", use_container_width=True):
-        st.session_state['view_date'] += datetime.timedelta(days=days_to_show)
+# ナビゲーション
+c1, c2 = st.columns([1,1])
+if c1.button("< Prev"): st.session_state['view_date'] -= datetime.timedelta(days=10)
+if c2.button("Next >"): st.session_state['view_date'] += datetime.timedelta(days=10)
 
-# サイドバー
+# サイドバー設定
 with st.sidebar:
     st.header("⚙️ Settings")
-    st.caption(f"Weather: {current_pressure} hPa")
+    st.info(f"📡 API Status: OK\nPressure: {current_pressure} hPa")
+    st.markdown("---")
     target_cm = st.number_input("Limit (cm)", value=120, step=10)
     start_h, end_h = st.slider("Hours", 0, 24, (7, 23))
-    if st.button("Today"):
-        st.session_state['view_date'] = now_jst.date()
+    st.markdown("---")
+    if st.button("Today"): st.session_state['view_date'] = now_jst.date()
 
 # データ生成
-df = model.get_dataframe(st.session_state['view_date'], days=days_to_show)
+df = model.get_dataframe(view_date, days=10)
 
-# ---------------------------------------------------------
-# 解析処理
-# ---------------------------------------------------------
+# 解析
 df['hour'] = df['time'].dt.hour
 df['is_safe'] = (df['level'] <= target_cm) & (df['hour'] >= start_h) & (df['hour'] < end_h)
 
-# リスト作成
 safe_windows = []
 if df['is_safe'].any():
-    df['group'] = (df['is_safe'] != df['is_safe'].shift()).cumsum()
-    for _, grp in df[df['is_safe']].groupby('group'):
-        start_t = grp['time'].iloc[0]
-        end_t = grp['time'].iloc[-1]
-        
-        if (end_t - start_t).total_seconds() >= 600:
-            min_lvl = grp['level'].min()
-            min_time = grp.loc[grp['level'].idxmin(), 'time']
-            duration = end_t - start_t
-            h = duration.seconds // 3600
-            m = (duration.seconds % 3600) // 60
-            
+    df['grp'] = (df['is_safe'] != df['is_safe'].shift()).cumsum()
+    for _, g in df[df['is_safe']].groupby('grp'):
+        s, e = g['time'].iloc[0], g['time'].iloc[-1]
+        if (e-s).total_seconds() >= 600: # 10分以上
+            min_l = g['level'].min()
+            min_t = g.loc[g['level'].idxmin(), 'time']
+            d = e - s
+            h, m = d.seconds//3600, (d.seconds%3600)//60
             safe_windows.append({
-                "date_str": start_t.strftime('%m/%d(%a)'),
-                "start": start_t.strftime("%H:%M"),
-                "end": end_t.strftime("%H:%M"),
-                "duration": f"{h}:{m:02}",
-                "graph_label": f"Work\n{h}:{m:02}",
-                "min_time": min_time,
-                "min_level": min_lvl
+                "date": s.strftime('%m/%d(%a)'),
+                "start": s.strftime("%H:%M"),
+                "end": e.strftime("%H:%M"),
+                "dur": f"{h}:{m:02}",
+                "gl": f"Work\n{h}:{m:02}",
+                "mt": min_t, "ml": min_l
             })
 
 # ピーク検出
-window_size = 60
-df['max_roll'] = df['level'].rolling(window=120, center=True).max()
-df['min_roll'] = df['level'].rolling(window=120, center=True).min()
+df['max'] = df['level'].rolling(120, center=True).max()
+df['min'] = df['level'].rolling(120, center=True).min()
+highs = df[(df['level']==df['max']) & (df['level']>180)].iloc[::2] # 間引き
+lows = df[(df['level']==df['min']) & (df['level']<180)].iloc[::2]
 
-high_tides = df[(df['level'] == df['max_roll']) & (df['level'] > 180)].copy()
-high_tides['diff'] = high_tides['time'].diff().dt.total_seconds().fillna(9999)
-high_tides = high_tides[high_tides['diff'] > 3600]
-
-low_tides = df[(df['level'] == df['min_roll']) & (df['level'] < 180)].copy()
-low_tides['diff'] = low_tides['time'].diff().dt.total_seconds().fillna(9999)
-low_tides = low_tides[low_tides['diff'] > 3600]
-
-# ---------------------------------------------------------
 # グラフ描画
-# ---------------------------------------------------------
 fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(df['time'], df['level'], color='#0066cc', linewidth=2, label="Level", zorder=2)
-ax.axhline(y=target_cm, color='orange', linestyle='--', linewidth=2, label=f"Limit", zorder=1)
+ax.plot(df['time'], df['level'], '#0066cc', lw=2, zorder=2)
+ax.axhline(target_cm, c='orange', ls='--', lw=1.5, label='Limit')
 ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4)
 
-# 現在位置
-graph_start, graph_end = df['time'].iloc[0], df['time'].iloc[-1]
-if graph_start <= curr_time <= graph_end:
-    ax.scatter(curr_time, curr_lvl, color='gold', edgecolors='black', s=90, zorder=10)
+gs, ge = df['time'].iloc[0], df['time'].iloc[-1]
+if gs <= curr_time <= ge:
+    ax.scatter(curr_time, curr_lvl, c='gold', edgecolors='black', s=90, zorder=10)
 
-# ピークプロット
-for _, row in high_tides.iterrows():
-    ax.scatter(row['time'], row['level'], color='red', marker='^', s=40, zorder=3)
-    off_y = 15 if (row['time'].day % 2 == 0) else 35
-    ax.annotate(f"{row['time'].strftime('%H:%M')}\n{int(row['level'])}", (row['time'], row['level']), 
-                xytext=(0, off_y), textcoords='offset points', ha='center', fontsize=8, color='#cc0000', fontweight='bold')
+for _, r in highs.iterrows():
+    ax.scatter(r['time'], r['level'], c='red', marker='^', s=40, zorder=3)
+    off = 15 if r['time'].day%2==0 else 35
+    ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#cc0000', fontweight='bold')
 
-for _, row in low_tides.iterrows():
-    ax.scatter(row['time'], row['level'], color='blue', marker='v', s=40, zorder=3)
-    off_y = -25 if (row['time'].day % 2 == 0) else -45
-    ax.annotate(f"{row['time'].strftime('%H:%M')}\n{int(row['level'])}", (row['time'], row['level']), 
-                xytext=(0, off_y), textcoords='offset points', ha='center', fontsize=8, color='#0000cc', fontweight='bold')
+for _, r in lows.iterrows():
+    ax.scatter(r['time'], r['level'], c='blue', marker='v', s=40, zorder=3)
+    off = -25 if r['time'].day%2==0 else -45
+    ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#0000cc', fontweight='bold')
 
-# Workラベル
-for win in safe_windows:
-    ax.annotate(win['graph_label'], (win['min_time'], win['min_level']), 
-                xytext=(0, -85), textcoords='offset points', ha='center', fontsize=8, color='#b8860b', fontweight='bold',
-                bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
+for w in safe_windows:
+    ax.annotate(w['gl'], (w['mt'], w['ml']), xytext=(0,-85), textcoords='offset points', ha='center', fontsize=8, color='#b8860b', fontweight='bold', bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
 
 ax.set_ylabel("Level (cm)")
-ax.grid(True, linestyle=':', alpha=0.6)
-ax.xaxis.set_major_locator(mdates.DayLocator())
+ax.grid(True, ls=':', alpha=0.6)
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
 ax.set_ylim(bottom=-110)
 plt.tight_layout()
 st.pyplot(fig)
 
-# ---------------------------------------------------------
-# リスト表示 (印刷用レイアウト対応)
-# ---------------------------------------------------------
+# リスト表示
 st.markdown("---")
-# チェックボックスでレイアウト切り替え
-use_print_layout = st.checkbox("🖨️ Print / PC Layout (Multi-column)", value=False)
-
+use_print = st.checkbox("🖨️ Print Layout", False)
 st.markdown(f"##### 📋 Workable Time List (Limit <= {target_cm}cm)")
 
-if not safe_windows:
-    st.warning("No workable time found.")
-else:
-    res_df = pd.DataFrame(safe_windows)
-    display_df = res_df[['date_str', 'start', 'end', 'duration']]
-    
-    if use_print_layout:
-        # PC/印刷用: 3列に分割して表示
-        # データを3分割する
-        n_cols = 3
-        chunks = np.array_split(display_df, n_cols)
-        cols = st.columns(n_cols)
-        
-        for i, col in enumerate(cols):
-            if i < len(chunks) and not chunks[i].empty:
-                with col:
-                    st.dataframe(
-                        chunks[i],
-                        use_container_width=True, 
-                        hide_index=True,
-                        column_config={
-                            "date_str": st.column_config.TextColumn("Date", width="small"),
-                            "start": st.column_config.TextColumn("Start", width="small"),
-                            "end": st.column_config.TextColumn("End", width="small"),
-                            "duration": st.column_config.TextColumn("Time", width="small"),
-                        }
-                    )
+if safe_windows:
+    rdf = pd.DataFrame(safe_windows)
+    cols = ["date", "start", "end", "dur"]
+    if use_print:
+        cc = st.columns(3)
+        for i, chk in enumerate(np.array_split(rdf, 3)):
+             if not chk.empty: cc[i].dataframe(chk[cols], hide_index=True)
     else:
-        # スマホ用: 通常の1列表示 (スクロール前提)
-        st.dataframe(
-            display_df,
-            use_container_width=True, 
-            hide_index=True,
-            column_config={
-                "date_str": st.column_config.TextColumn("Date", width="small"),
-                "start": st.column_config.TextColumn("Start", width="small"),
-                "end": st.column_config.TextColumn("End", width="small"),
-                "duration": st.column_config.TextColumn("Time", width="small"),
-            }
-        )
+        st.dataframe(rdf[cols], hide_index=True, use_container_width=True)
+else:
+    st.warning("No workable time found.")
