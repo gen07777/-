@@ -1,269 +1,200 @@
-import streamlit as st
+import requests
 import datetime
 import math
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from matplotlib import font_manager
-import requests
-import numpy as np
 
-# ---------------------------------------------------------
-# アプリ設定
-# ---------------------------------------------------------
-st.set_page_config(layout="wide", page_title="Onishi Port Precision Tide")
-OWM_API_KEY = "f8b87c403597b305f1bbf48a3bdf8dcb"
+# ==========================================
+# ユーザー設定エリア
+# ==========================================
+OPENWEATHER_API_KEY = "f8b87c403597b305f1bbf48a3bdf8dcb"  # 提供されたAPIキー
+TARGET_YEAR = 2026       # 取得したい年
+STATION_CODE = "344311"  # 竹原の地点コード (気象庁)
 
-# ---------------------------------------------------------
-# スタイル設定
-# ---------------------------------------------------------
-st.markdown("""
-<style>
-    div.stButton > button { width: 100%; height: 3.0rem; font-size: 1rem; margin-top: 0px; }
-    [data-testid="column"] { min-width: 0px !important; flex: 1 !important; }
-    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
-    h5 { margin-bottom: 0px; }
-</style>
-""", unsafe_allow_html=True)
+# 大西港 補正定数 (検証結果に基づく)
+TIME_OFFSET_MIN = 1      # 時間補正 (+1分)
+LEVEL_BASE_OFFSET = 13   # 基準面補正 (+13cm)
+STANDARD_PRESSURE = 1013 # 標準気圧 (hPa)
 
-def configure_font():
-    plt.rcParams['font.family'] = 'sans-serif'
-configure_font()
-
-# ---------------------------------------------------------
-# セッション状態
-# ---------------------------------------------------------
-if 'view_date' not in st.session_state:
-    now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-    st.session_state['view_date'] = now_jst.date()
-
-# ---------------------------------------------------------
-# API: 気圧自動取得
-# ---------------------------------------------------------
-@st.cache_data(ttl=3600)
-def get_current_pressure():
-    lat, lon = 34.234, 132.831
-    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OWM_API_KEY}&units=metric"
+# ==========================================
+# 1. 気象庁データ自動取得 & 解析モジュール
+# ==========================================
+def fetch_jma_tide_data(year, station_code):
+    """
+    気象庁の公式サイトから指定された年・地点の毎時潮位データ(TXT)を取得し、
+    満潮・干潮を計算して辞書形式で返す。
+    """
+    # 気象庁のデータURL（水産庁用・毎時潮位データ）
+    # データ形式: 1行に1日分。スペース区切りで日付と0時~23時の潮位(cm)が並ぶ
+    url = f"https://www.data.jma.go.jp/kaiyou/data/db/tide/suisan/txt/{year}/{station_code}.txt"
+    
+    print(f"【データ取得】気象庁サーバからデータをダウンロード中... ({url})")
     try:
-        res = requests.get(url, timeout=3)
+        response = requests.get(url)
+        if response.status_code != 200:
+            print("【エラー】データの取得に失敗しました。URLまたは年を確認してください。")
+            return {}
+        
+        raw_lines = response.text.splitlines()
+        parsed_data = {}
+
+        for line in raw_lines:
+            # データ行の解析 (形式: Station YY MM DD H00 H01 ... H23)
+            # ※気象庁のTXT形式は固定長に近いスペース区切り
+            parts = line.split()
+            if len(parts) < 28: continue # データ不足行はスキップ
+            
+            # 日付情報の抽出
+            try:
+                # 最初のカラムが地点コードでなく年等の場合もあるため、柔軟に解析
+                # 標準フォーマット: [Code] [YY] [MM] [DD] [00h] [01h] ...
+                # ただし最初の行やヘッダを除く必要があるが、数値のみの行を対象とする
+                if not parts[0].isdigit(): continue
+                
+                # 年月日の取得 (parts[1]が年下2桁の場合などフォーマットに注意)
+                # ここでは簡易的に配列のインデックスで取得
+                m_month = int(parts[2])
+                m_day   = int(parts[3])
+                date_str = f"{year}-{m_month:02d}-{m_day:02d}"
+                
+                # 毎時データの取得 (4番目の要素から24個)
+                hourly_levels = [int(h) for h in parts[4:28]]
+                
+                # 毎時データから満潮・干潮（ピーク）を推定計算
+                peaks = detect_tide_peaks(hourly_levels, date_str)
+                parsed_data[date_str] = peaks
+                
+            except ValueError:
+                continue
+
+        print(f"【完了】{len(parsed_data)}日分の潮汐データを解析しました。")
+        return parsed_data
+
+    except Exception as e:
+        print(f"【例外】データ処理中にエラーが発生しました: {e}")
+        return {}
+
+def detect_tide_peaks(hourly, date_str):
+    """
+    24時間の毎時データから、ラグランジュ補間または二次関数近似を用いて
+    満潮・干潮の「正確な分単位」の時刻と潮位を推定する簡易ロジック
+    """
+    peaks = []
+    # 前日・翌日のデータがないため、当日0時〜23時の範囲で極値を探索
+    # (本格的なアプリでは前後のデータも連結して計算します)
+    for i in range(1, 23):
+        y_prev = hourly[i-1]
+        y_curr = hourly[i]
+        y_next = hourly[i+1]
+        
+        # 極大値 (満潮) の判定
+        if y_prev < y_curr and y_curr >= y_next:
+            time_min, level = interpolate_peak(i, y_prev, y_curr, y_next)
+            peaks.append({"type": "満潮", "time": time_min, "level": int(level)})
+            
+        # 極小値 (干潮) の判定
+        elif y_prev > y_curr and y_curr <= y_next:
+            time_min, level = interpolate_peak(i, y_prev, y_curr, y_next)
+            peaks.append({"type": "干潮", "time": time_min, "level": int(level)})
+            
+    return peaks
+
+def interpolate_peak(hour_idx, y1, y2, y3):
+    """
+    3点の潮位から放物線近似を行い、ピークの時刻（分）と潮位を算出する
+    """
+    # 簡易的な二次補間
+    # 頂点のずれ dt = (y1 - y3) / (2 * (y1 - 2*y2 + y3))
+    denom = (y1 - 2*y2 + y3)
+    if denom == 0:
+        dt = 0
+    else:
+        dt = (y1 - y3) / (2 * denom) * 0.5 # 0.5倍係数で調整
+    
+    # ピーク時刻 (時:分)
+    peak_hour = hour_idx + dt
+    total_minutes = int(peak_hour * 60)
+    hour = total_minutes // 60
+    minute = total_minutes % 60
+    time_str = f"{hour:02d}:{minute:02d}"
+    
+    # ピーク潮位 (y2 + 補正分)
+    if denom == 0:
+        peak_level = y2
+    else:
+        peak_level = y2 - (y1 - y3) * dt / 4 # 簡易近似
+        
+    return time_str, peak_level
+
+# ==========================================
+# 2. OpenWeatherMap 気圧取得モジュール
+# ==========================================
+def get_current_pressure():
+    # 大西港付近の座標
+    lat, lon = 34.23, 132.83
+    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=metric&lang=ja"
+    
+    try:
+        res = requests.get(url, timeout=5)
         if res.status_code == 200:
-            return float(res.json()['main']['pressure'])
-    except:
-        pass
-    return 1013.0
+            data = res.json()
+            pressure = data["main"]["pressure"]
+            print(f"【現在気象】取得成功: {pressure} hPa (場所: {data.get('name')})")
+            return pressure
+        else:
+            print(f"【気象APIエラー】Code: {res.status_code}")
+            return STANDARD_PRESSURE
+    except Exception:
+        print("【通信エラー】気象データの取得に失敗。標準気圧を使用します。")
+        return STANDARD_PRESSURE
 
-# ---------------------------------------------------------
-# 月齢・潮名
-# ---------------------------------------------------------
-def get_moon_age(date_obj):
-    base = datetime.date(2000, 1, 6)
-    return ((date_obj - base).days) % 29.53059
+# ==========================================
+# 3. メイン処理 (大西港 補正実行)
+# ==========================================
+def main_calculate_onishi(target_date_str):
+    # 1. 潮汐データの準備 (キャッシュがあればそれを使う想定)
+    tide_data_db = fetch_jma_tide_data(TARGET_YEAR, STATION_CODE)
+    
+    if target_date_str not in tide_data_db:
+        print(f"指定された日付({target_date_str})のデータが見つかりません。")
+        return
 
-def get_tide_name(moon_age):
-    m = int(moon_age)
-    if m >= 30: m -= 30
-    if 0<=m<=2 or 14<=m<=17 or 29<=m<=30: return "大潮 (Spring)"
-    elif 3<=m<=5 or 18<=m<=20: return "中潮 (Middle)"
-    elif 6<=m<=9 or 21<=m<=24: return "小潮 (Neap)"
-    elif 10<=m<=12: return "長潮 (Long)"
-    elif m==13 or 25<=m<=28: return "若潮 (Young)"
-    return "中潮 (Middle)"
-
-# ---------------------------------------------------------
-# 潮汐モデル (釣割データからの逆算キャリブレーション版)
-# ---------------------------------------------------------
-class CalibratedTideModel:
-    def __init__(self, pressure_hpa):
-        # 基準日時: 2026/1/7 12:39 満潮 342cm (釣割データ)
-        self.epoch_time = datetime.datetime(2026, 1, 7, 12, 39)
-        self.msl = 180.0
+    # 2. 気圧取得
+    current_hpa = get_current_pressure()
+    
+    # 3. 補正計算
+    # 吸い上げ効果: (1013 - 現在気圧) cm
+    pressure_correction = int(STANDARD_PRESSURE - current_hpa)
+    
+    print("\n" + "="*50)
+    print(f" 🚢 大西港 (大崎上島) リアルタイム潮汐予測 ")
+    print(f" 日付: {target_date_str}")
+    print(f" 条件: 気圧 {current_hpa}hPa (補正値: {pressure_correction:+d}cm)")
+    print(f" 定数: 基準差 +{LEVEL_BASE_OFFSET}cm / 時間 +{TIME_OFFSET_MIN}分")
+    print("="*50)
+    print(f"時刻  | 予測潮位 | 潮名 | (参考:竹原生データ)")
+    print("-" * 50)
+    
+    daily_tides = tide_data_db[target_date_str]
+    
+    for tide in daily_tides:
+        # 時刻の補正
+        t_hour, t_min = map(int, tide['time'].split(':'))
+        # 分を加算して繰り上がり処理
+        total_m = t_hour * 60 + t_min + TIME_OFFSET_MIN
+        new_h = (total_m // 60) % 24
+        new_m = total_m % 60
+        new_time_str = f"{new_h:02d}:{new_m:02d}"
         
-        # 気圧補正 (1013hPa基準)
-        self.pressure_correction = (1013.0 - pressure_hpa) * 1.0
+        # 潮位の補正
+        final_level = tide['level'] + LEVEL_BASE_OFFSET + pressure_correction
         
-        # ■成分調整（釣割のグラフ特性に合わせてチューニング）
-        # M2: 主太陰 (ベースの波) - 強める
-        # S2: 主太陽 (大潮小潮の差) - 弱める (小潮でも潮位が下がらないように)
-        # K1/O1: 日周潮 (2回満潮の差) - 弱める (小さい満潮を高くするため)
-        
-        self.consts = [
-            # M2: メインの波。振幅140cm確保
-            {'name':'M2', 'speed':28.984104, 'amp':140.0, 'phase':0},
-            
-            # S2: これが大きいと小潮で下がりすぎる。30cm程度に抑える(通常は50程度)
-            {'name':'S2', 'speed':30.000000, 'amp':35.0,  'phase':0},
-            
-            # K1, O1: これらが大きいと「小さい満潮」が低くなる。
-            # 釣割データ(差40cm程度)に合わせ、合計で25cm程度の影響に抑える
-            {'name':'K1', 'speed':15.041069, 'amp':15.0,  'phase':0},
-            {'name':'O1', 'speed':13.943036, 'amp':10.0,  'phase':0},
-            
-            # N2: 月の距離。少し入れる
-            {'name':'N2', 'speed':28.439730, 'amp':25.0,  'phase':0},
-            
-            # M4: 地形歪み。位相200度付近で「引きを早く、満ちを遅く」
-            {'name':'M4', 'speed':57.968208, 'amp':10.0,  'phase':200}
-        ]
+        print(f"{new_time_str} | {int(final_level):4d} cm | {tide['type']} | {tide['time']} / {int(tide['level'])}cm")
 
-    def _calc_raw(self, target_dt):
-        delta_hours = (target_dt - self.epoch_time).total_seconds() / 3600.0
-        
-        level = self.msl + self.pressure_correction
-        
-        for c in self.consts:
-            theta_rad = math.radians(c['speed'] * delta_hours - c['phase'])
-            level += c['amp'] * math.cos(theta_rad)
-            
-        return level
-
-    def get_dataframe(self, start_date, days=10):
-        start_dt = datetime.datetime.combine(start_date, datetime.time(0, 0))
-        end_dt = start_dt + datetime.timedelta(days=days) - datetime.timedelta(minutes=1)
-        time_index = pd.date_range(start=start_dt, end=end_dt, freq='1min')
-        levels = [self._calc_raw(t) for t in time_index]
-        return pd.DataFrame({"time": time_index, "level": levels})
-
-    def get_current_level(self):
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        now_jst = now_utc + datetime.timedelta(hours=9)
-        now_naive = now_jst.replace(tzinfo=None)
-        return now_naive, self._calc_raw(now_naive)
-
-# ---------------------------------------------------------
-# ヘルパー: 重複ピーク除去
-# ---------------------------------------------------------
-def deduplicate_peaks(df_peaks, min_dist_mins=60):
-    if df_peaks.empty: return df_peaks
-    keep = []
-    last_time = None
-    for idx, row in df_peaks.iterrows():
-        if last_time is None or (row['time'] - last_time).total_seconds()/60 > min_dist_mins:
-            keep.append(idx)
-            last_time = row['time']
-    return df_peaks.loc[keep]
-
-# ---------------------------------------------------------
-# UI
-# ---------------------------------------------------------
-st.markdown("<h5 style='margin-bottom:5px;'>⚓ Onishi Port (Calibrated)</h5>", unsafe_allow_html=True)
-now_jst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-
-current_pressure = get_current_pressure()
-model = CalibratedTideModel(pressure_hpa=current_pressure)
-curr_time, curr_lvl = model.get_current_level()
-
-view_date = st.session_state['view_date']
-ma = get_moon_age(view_date)
-tn = get_tide_name(ma)
-
-# 情報表示
-p_diff = int(1013 - current_pressure)
-adj_txt = f"+{p_diff}" if p_diff > 0 else f"{p_diff}"
-if p_diff == 0: adj_txt = "0"
-
-st.markdown(f"""
-<div style="font-size:0.85rem; background:#f8f9fa; padding:8px; border:1px solid #ddd; margin-bottom:5px; border-radius:4px;">
- <div><b>Period:</b> {view_date.strftime('%m/%d')}~ <span style="color:#555;">(Moon:{ma:.1f} {tn})</span></div>
- <div style="margin-top:2px;">
-   <span style="color:#0066cc; font-weight:bold;">Now: {curr_time.strftime('%H:%M')} {int(curr_lvl)}cm</span>
-   <span style="font-size:0.75rem; color:#666; margin-left:5px;">(Press:{int(current_pressure)}hPa <span style="color:#d62728;">Adj:{adj_txt}cm</span>)</span>
- </div>
-</div>
-""", unsafe_allow_html=True)
-
-# ナビゲーション
-c1, c2 = st.columns([1,1])
-if c1.button("< Prev"): st.session_state['view_date'] -= datetime.timedelta(days=10)
-if c2.button("Next >"): st.session_state['view_date'] += datetime.timedelta(days=10)
-
-# サイドバー
-with st.sidebar:
-    st.header("⚙️ Settings")
-    st.info(f"📡 API Status: OK\nPressure: {current_pressure} hPa")
-    st.markdown("---")
-    target_cm = st.number_input("Limit (cm)", value=130, step=10)
-    start_h, end_h = st.slider("Hours", 0, 24, (7, 23))
-    st.markdown("---")
-    if st.button("Today"): st.session_state['view_date'] = now_jst.date()
-
-# データ生成
-df = model.get_dataframe(view_date, days=10)
-
-# 解析
-df['hour'] = df['time'].dt.hour
-df['is_safe'] = (df['level'] <= target_cm) & (df['hour'] >= start_h) & (df['hour'] < end_h)
-
-safe_windows = []
-if df['is_safe'].any():
-    df['grp'] = (df['is_safe'] != df['is_safe'].shift()).cumsum()
-    for _, g in df[df['is_safe']].groupby('grp'):
-        s, e = g['time'].iloc[0], g['time'].iloc[-1]
-        if (e-s).total_seconds() >= 600:
-            min_l = g['level'].min()
-            min_t = g.loc[g['level'].idxmin(), 'time']
-            d = e - s
-            h, m = d.seconds//3600, (d.seconds%3600)//60
-            safe_windows.append({
-                "date": s.strftime('%m/%d(%a)'),
-                "start": s.strftime("%H:%M"),
-                "end": e.strftime("%H:%M"),
-                "dur": f"{h}:{m:02}",
-                "gl": f"Work\n{h}:{m:02}",
-                "mt": min_t, "ml": min_l
-            })
-
-# ピーク検出
-window = 120
-df['max'] = df['level'].rolling(window, center=True).max()
-df['min'] = df['level'].rolling(window, center=True).min()
-
-raw_highs = df[(df['level'] == df['max']) & (df['level'] > 180)].copy()
-raw_lows = df[(df['level'] == df['min']) & (df['level'] < 180)].copy()
-
-highs = deduplicate_peaks(raw_highs)
-lows = deduplicate_peaks(raw_lows)
-
-# グラフ描画
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(df['time'], df['level'], '#0066cc', lw=2, zorder=2)
-ax.axhline(target_cm, c='orange', ls='--', lw=1.5, label='Limit')
-ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4)
-
-gs, ge = df['time'].iloc[0], df['time'].iloc[-1]
-if gs <= curr_time <= ge:
-    ax.scatter(curr_time, curr_lvl, c='gold', edgecolors='black', s=90, zorder=10)
-
-for _, r in highs.iterrows():
-    ax.scatter(r['time'], r['level'], c='red', marker='^', s=40, zorder=3)
-    off = 15 if r['time'].day%2==0 else 35
-    ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#cc0000', fontweight='bold')
-
-for _, r in lows.iterrows():
-    ax.scatter(r['time'], r['level'], c='blue', marker='v', s=40, zorder=3)
-    off = -25 if r['time'].day%2==0 else -45
-    ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#0000cc', fontweight='bold')
-
-for w in safe_windows:
-    ax.annotate(w['gl'], (w['mt'], w['ml']), xytext=(0,-85), textcoords='offset points', ha='center', fontsize=8, color='#b8860b', fontweight='bold', bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
-
-ax.set_ylabel("Level (cm)")
-ax.grid(True, ls=':', alpha=0.6)
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-ax.set_ylim(bottom=-130)
-plt.tight_layout()
-st.pyplot(fig)
-
-# リスト
-st.markdown("---")
-st.markdown(f"##### 📋 Workable Time List (Limit <= {target_cm}cm)")
-
-if safe_windows:
-    rdf = pd.DataFrame(safe_windows)
-    cols = ["date", "start", "end", "dur"]
-    cc = st.columns(3)
-    chunks = np.array_split(rdf, 3)
-    for i, col in enumerate(cc):
-        if i < len(chunks) and not chunks[i].empty:
-            col.dataframe(chunks[i][cols], hide_index=True, use_container_width=True)
-else:
-    st.warning("No workable time found.")
+# ==========================================
+# 実行エントリーポイント
+# ==========================================
+if __name__ == "__main__":
+    # テストとして今日の日付で実行 (または2026年の特定日)
+    # 実際の運用では datetime.date.today() を使用
+    today_str = f"{TARGET_YEAR}-01-04" # 紙面比較用のテスト日
+    
+    main_calculate_onishi(today_str)
