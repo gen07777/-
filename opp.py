@@ -1,3 +1,8 @@
+エラーの解消、よかったです！
+スマホで「前の5日間」「次の5日間」のボタンが上下に並んでしまう（積み重なってしまう）件ですね。
+Streamlitはスマホだと自動的に縦並びにする仕様があるのですが、強制的に「左右（横並び）」にする魔法のCSSを強化して組み込みました。
+また、下のリストもスマホで3列だと潰れてしまうため、2列（左右）で見やすく調整しました。
+これを opp.py に上書きしてください。
 import streamlit as st
 import datetime
 import pandas as pd
@@ -10,7 +15,7 @@ import math
 # ==========================================
 # 1. アプリ設定 & 定数定義
 # ==========================================
-st.set_page_config(layout="wide", page_title="Onishi Tide Forecast")
+st.set_page_config(layout="wide", page_title="大西港 潮汐予測")
 
 # APIキー (OpenWeatherMap)
 OWM_API_KEY = "f8b87c403597b305f1bbf48a3bdf8dcb"
@@ -21,20 +26,36 @@ LEVEL_BASE_OFFSET = 13    # 基準面補正 +13cm
 STANDARD_PRESSURE = 1013  # 標準気圧
 
 # ==========================================
-# 2. スタイル & フォント設定 (文字化け対策)
+# 2. スタイル & フォント設定
 # ==========================================
 st.markdown("""
 <style>
-    div.stButton > button { width: 100%; height: 3.0rem; font-size: 1rem; margin-top: 0px; }
-    [data-testid="column"] { min-width: 0px !important; flex: 1 !important; }
+    /* ボタンのスタイル調整 */
+    div.stButton > button { 
+        width: 100%; 
+        height: 3.0rem; 
+        font-size: 1rem; 
+        margin-top: 0px;
+        padding: 0px; /* スマホでの文字切れ防止 */
+    }
     .block-container { padding-top: 1rem; padding-bottom: 2rem; }
     h5 { margin-bottom: 0px; }
+
+    /* 【重要】スマホでもカラムを強制的に横並びにするCSS */
+    [data-testid="column"] {
+        width: calc(50% - 1rem) !important;
+        flex: 1 1 calc(50% - 1rem) !important;
+        min-width: 0 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# 【重要】フォント設定をリセットしてデフォルトに戻す（□化け回避の最善策）
-# グラフ内の文字はすべてASCII(英語)にします
-plt.rcParams.update(plt.rcParamsDefault)
+# グラフのフォント設定（英語フォントを指定して□化けを防ぐ）
+def configure_font():
+    plt.rcParams.update(plt.rcParamsDefault) # デフォルトに戻すのが一番安全
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans', 'Verdana']
+configure_font()
 
 # ==========================================
 # 3. データ取得 (API & 気象庁)
@@ -73,59 +94,37 @@ def fetch_jma_data_map(year):
     return data_map
 
 # ==========================================
-# 4. 高精度スプライン補間 (Catmull-Rom Spline)
+# 4. 高精度スプライン補間 (Catmull-Rom)
 # ==========================================
-# Scipyを使わずに、点と点を自然な曲線でつなぐ数学ロジックです。
-# カクカクや不自然な平坦さを完全に解消します。
-
-def catmull_rom_spline(p0, p1, p2, p3, n_points=60):
-    """4点 p0, p1, p2, p3 から p1-p2間の曲線を生成する"""
+def catmull_rom_spline(p0, p1, p2, p3, n_points=30):
     t = np.linspace(0, 1, n_points)
     t2 = t * t
     t3 = t2 * t
-    
-    # Catmull-Rom 係数行列
     v0 = (p2 - p0) * 0.5
     v1 = (p3 - p1) * 0.5
-    
-    # 3次多項式の計算
     a = 2*p1 - 2*p2 + v0 + v1
     b = -3*p1 + 3*p2 - 2*v0 - v1
     c = v0
     d = p1
-    
     return a*t3 + b*t2 + c*t + d
 
-def generate_smooth_curve(timestamps, hourly_levels, resolution_min=1):
-    """毎時データをCatmull-Romスプラインで分単位になめらかにする"""
-    
-    # データの準備 (前後の制御点用にパディング)
+def generate_smooth_curve(timestamps, hourly_levels):
+    """毎時データをなめらかな曲線にする"""
     y = hourly_levels
-    # 先頭と末尾を複製して制御点を確保
     y_padded = [y[0]] + y + [y[-1]]
-    
     smooth_times = []
     smooth_levels = []
     
-    # 各区間を補間
     for i in range(len(y) - 1):
-        # 制御点4つ: p0, p1(現在), p2(次), p3
         p0, p1, p2, p3 = y_padded[i], y_padded[i+1], y_padded[i+2], y_padded[i+3]
-        
-        # 1時間分の曲線データを生成 (60個の点)
         segment_levels = catmull_rom_spline(p0, p1, p2, p3, n_points=60)
-        
-        # 時刻データを生成
         t_start = timestamps[i]
         segment_times = [t_start + datetime.timedelta(minutes=m) for m in range(60)]
-        
         smooth_levels.extend(segment_levels)
         smooth_times.extend(segment_times)
     
-    # 最後の点を追加
     smooth_times.append(timestamps[-1])
     smooth_levels.append(hourly_levels[-1])
-    
     return pd.DataFrame({"time": smooth_times, "level": smooth_levels})
 
 # ==========================================
@@ -166,7 +165,6 @@ class OnishiTideModel:
         self.time_offset = TIME_OFFSET_MIN
     
     def get_backup_level(self, dt):
-        """データ不足時の数式バックアップ (これも滑らか)"""
         epoch = datetime.datetime(2026, 1, 1, 0, 0)
         delta_h = (dt - epoch).total_seconds() / 3600.0
         level = 180 
@@ -179,7 +177,6 @@ class OnishiTideModel:
         levels_hourly = []
         
         start_dt = datetime.datetime.combine(start_date, datetime.time(0, 0))
-        # スプライン補間のために前後の余分なデータも含めて取得
         calc_start = start_dt - datetime.timedelta(hours=2)
         calc_end = start_dt + datetime.timedelta(days=days) + datetime.timedelta(hours=2)
         
@@ -195,17 +192,12 @@ class OnishiTideModel:
                 val = self.get_backup_level(curr)
             
             final_val = val + self.total_level_offset
-            # 時間補正適用
             t_point = curr + datetime.timedelta(minutes=self.time_offset)
-            
             timestamps_hourly.append(t_point)
             levels_hourly.append(final_val)
             curr += datetime.timedelta(hours=1)
             
-        # スプライン補間でなめらかにする
         df_smooth = generate_smooth_curve(timestamps_hourly, levels_hourly)
-        
-        # 表示期間のみ切り出し
         mask = (df_smooth['time'] >= start_dt) & (df_smooth['time'] < (start_dt + datetime.timedelta(days=days)))
         return df_smooth.loc[mask].reset_index(drop=True)
 
@@ -230,7 +222,6 @@ if 'view_date' not in st.session_state:
 view_date = st.session_state['view_date']
 st.markdown("<h5 style='margin-bottom:5px;'>⚓ 大西港 潮汐・作業予報</h5>", unsafe_allow_html=True)
 
-# データ生成
 current_pressure = get_current_pressure()
 model = OnishiTideModel(pressure_hpa=current_pressure, year=2026)
 df = model.get_dataframe(view_date, days=5)
@@ -253,7 +244,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ナビゲーション
+# ナビゲーション (スマホでも横並び)
 c1, c2 = st.columns([1,1])
 if c1.button("前の5日間 <"): st.session_state['view_date'] -= datetime.timedelta(days=5)
 if c2.button("> 次の5日間"): st.session_state['view_date'] += datetime.timedelta(days=5)
@@ -288,7 +279,7 @@ if df['is_safe'].any():
                 "開始": s.strftime("%H:%M"),
                 "終了": e.strftime("%H:%M"),
                 "時間": f"{h}:{m:02}",
-                "gl": f"Work\n{h}:{m:02}", # グラフ用は英語
+                "gl": f"Work\n{h}:{m:02}",
                 "mt": min_t, "ml": min_l
             })
 
@@ -297,9 +288,7 @@ peak_window = 60
 df['is_high'] = False
 df['is_low'] = False
 levels_arr = df['level'].values
-# 端の処理エラー防止
-l_len = len(levels_arr)
-for i in range(peak_window, l_len-peak_window):
+for i in range(peak_window, len(levels_arr)-peak_window):
     window = levels_arr[i-peak_window : i+peak_window+1]
     center = levels_arr[i]
     if center == np.max(window) and center > 150:
@@ -310,22 +299,16 @@ for i in range(peak_window, l_len-peak_window):
 highs = deduplicate_peaks(df[df['is_high']].copy())
 lows = deduplicate_peaks(df[df['is_low']].copy())
 
-# ==========================================
-# 8. グラフ描画
-# ==========================================
+# グラフ描画
 fig, ax = plt.subplots(figsize=(10, 5))
-
-# メイン線 (スプライン補間で滑らか)
 ax.plot(df['time'], df['level'], '#0066cc', lw=2, zorder=2, label="Level")
 ax.axhline(target_cm, c='orange', ls='--', lw=1.5, label='Limit')
 ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4)
 
-# 現在位置
 gs, ge = df['time'].iloc[0], df['time'].iloc[-1]
 if gs <= curr_time <= ge:
     ax.scatter(curr_time, curr_lvl, c='gold', edgecolors='black', s=100, zorder=10)
 
-# 満潮マーク (文字は英語/数字のみ)
 for _, r in highs.iterrows():
     ax.scatter(r['time'], r['level'], c='red', marker='^', s=40, zorder=3)
     off = 15 if r['time'].day % 2 == 0 else 35
@@ -333,7 +316,6 @@ for _, r in highs.iterrows():
                 (r['time'], r['level']), xytext=(0,off), textcoords='offset points', 
                 ha='center', fontsize=8, color='#cc0000', fontweight='bold')
 
-# 干潮マーク
 for _, r in lows.iterrows():
     ax.scatter(r['time'], r['level'], c='blue', marker='v', s=40, zorder=3)
     off = -25 if r['time'].day % 2 == 0 else -45
@@ -341,39 +323,32 @@ for _, r in lows.iterrows():
                 (r['time'], r['level']), xytext=(0,off), textcoords='offset points', 
                 ha='center', fontsize=8, color='#0000cc', fontweight='bold')
 
-# 作業ラベル (Work)
 for w in safe_windows:
     ax.annotate(w['gl'], (w['mt'], w['ml']), xytext=(0,-85), textcoords='offset points', 
                 ha='center', fontsize=8, color='#b8860b', fontweight='bold', 
                 bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
 
-# 軸ラベル (英語)
 ax.set_ylabel("Level (cm)")
 ax.grid(True, ls=':', alpha=0.6)
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
 ax.set_ylim(bottom=df['level'].min() - 30, top=df['level'].max() + 50)
-
 plt.tight_layout()
 st.pyplot(fig)
 
-# ==========================================
-# 9. 作業時間リスト表示 (日本語OK)
-# ==========================================
+# 作業時間リスト (スマホ対応: 2列表示)
 st.markdown("---")
 st.markdown(f"##### 📋 作業可能時間リスト (潮位 {target_cm}cm以下)")
 
 if safe_windows:
-    # グラフ表示用に作った辞書リストをDataFrame化
     rdf = pd.DataFrame(safe_windows)
+    rdf_display = rdf[["日付", "開始", "終了", "時間"]]
     
-    # 必要な列だけ抽出 (日本語カラム)
-    display_cols = ["日付", "開始", "終了", "時間"]
-    rdf_display = rdf[display_cols]
-    
-    cc = st.columns(3)
-    chunks = np.array_split(rdf_display, 3)
+    # 【変更】スマホで見やすいように、3列ではなく2列に分割する
+    cc = st.columns(2)
+    chunks = np.array_split(rdf_display, 2)
     for i, col in enumerate(cc):
         if i < len(chunks) and not chunks[i].empty:
             col.dataframe(chunks[i], hide_index=True, use_container_width=True)
 else:
     st.warning("この期間に作業可能な時間帯はありません。")
+
