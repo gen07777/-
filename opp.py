@@ -21,33 +21,48 @@ LEVEL_BASE_OFFSET = 13    # 基準面補正 +13cm
 STANDARD_PRESSURE = 1013  # 標準気圧
 
 # ==========================================
-# 2. スタイル & フォント設定
+# 2. スタイル & フォント設定 (スマホ横並び強制版)
 # ==========================================
 st.markdown("""
 <style>
-    /* ボタンのスタイル調整 */
-    div.stButton > button { 
-        width: 100%; 
-        height: 3.0rem; 
-        font-size: 1rem; 
-        margin-top: 0px;
-        padding: 0px; /* スマホでの文字切れ防止 */
-    }
-    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
+    /* 全体の余白調整 */
+    .block-container { padding-top: 1rem; padding-bottom: 3rem; }
     h5 { margin-bottom: 0px; }
 
-    /* 【重要】スマホでもカラムを強制的に横並びにするCSS */
-    [data-testid="column"] {
-        width: calc(50% - 1rem) !important;
-        flex: 1 1 calc(50% - 1rem) !important;
-        min-width: 0 !important;
+    /* 【重要】スマホで強制的に横並びにする強力なCSS */
+    @media (max-width: 640px) {
+        /* カラムの入れ物（HorizontalBlock）を強制的に横並び(row)にする */
+        div[data-testid="stHorizontalBlock"] {
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            gap: 0.5rem !important;
+        }
+        /* 各カラムの幅を均等に強制する */
+        div[data-testid="column"] {
+            width: auto !important;
+            flex: 1 1 auto !important;
+            min-width: 0 !important;
+        }
+        /* ボタンの文字サイズを少し小さくして収まりやすくする */
+        div.stButton > button {
+            font-size: 0.85rem !important;
+            padding: 0px !important;
+            height: 2.8rem !important;
+            white-space: nowrap !important; /* 折り返し禁止 */
+        }
+    }
+    
+    /* PCなど通常時のボタン設定 */
+    div.stButton > button { 
+        width: 100%; 
+        margin-top: 0px;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # グラフのフォント設定（英語フォントを指定して□化けを防ぐ）
 def configure_font():
-    plt.rcParams.update(plt.rcParamsDefault) # デフォルトに戻すのが一番安全
+    plt.rcParams.update(plt.rcParamsDefault)
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans', 'Verdana']
 configure_font()
@@ -215,7 +230,7 @@ if 'view_date' not in st.session_state:
         st.session_state['view_date'] = now_jst.date()
 
 view_date = st.session_state['view_date']
-st.markdown("<h5 style='margin-bottom:5px;'>⚓ 大西港 潮汐・作業予報</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='margin-bottom:5px;'>⚓ 大西港 潮汐予測</h5>", unsafe_allow_html=True)
 
 current_pressure = get_current_pressure()
 model = OnishiTideModel(pressure_hpa=current_pressure, year=2026)
@@ -239,10 +254,11 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ナビゲーション (スマホでも横並び)
+# ナビゲーション (スマホ横並び対応)
 c1, c2 = st.columns([1,1])
-if c1.button("前の5日間 <"): st.session_state['view_date'] -= datetime.timedelta(days=5)
-if c2.button("> 次の5日間"): st.session_state['view_date'] += datetime.timedelta(days=5)
+# 文字を短くしてボタン幅を節約
+if c1.button("< 前5日"): st.session_state['view_date'] -= datetime.timedelta(days=5)
+if c2.button("次5日 >"): st.session_state['view_date'] += datetime.timedelta(days=5)
 
 # サイドバー
 with st.sidebar:
@@ -330,7 +346,7 @@ ax.set_ylim(bottom=df['level'].min() - 30, top=df['level'].max() + 50)
 plt.tight_layout()
 st.pyplot(fig)
 
-# 作業時間リスト (スマホ対応: 2列表示)
+# 作業時間リスト
 st.markdown("---")
 st.markdown(f"##### 📋 作業可能時間リスト (潮位 {target_cm}cm以下)")
 
@@ -338,7 +354,7 @@ if safe_windows:
     rdf = pd.DataFrame(safe_windows)
     rdf_display = rdf[["日付", "開始", "終了", "時間"]]
     
-    # 【変更】スマホで見やすいように、3列ではなく2列に分割する
+    # スマホ対応: 強制的に2列に分ける
     cc = st.columns(2)
     chunks = np.array_split(rdf_display, 2)
     for i, col in enumerate(cc):
