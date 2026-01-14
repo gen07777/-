@@ -346,4 +346,3 @@ if safe_windows:
             col.dataframe(chunks[i], hide_index=True, use_container_width=True)
 else:
     st.warning("この期間に作業可能な時間帯はありません。")
-
