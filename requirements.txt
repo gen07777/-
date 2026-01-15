@@ -3,4 +3,5 @@ pandas
 matplotlib
 requests
 numpy
-
+lxml
+beautifulsoup4
