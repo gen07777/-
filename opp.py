@@ -17,7 +17,7 @@ STANDARD_PRESSURE = 1013
 # ==========================================
 # 2. 教師データ (大西港フェリーターミナル)
 # ==========================================
-# 提供いただいたTide Graph BI(大西港)のデータを正解として使用
+# 提供いただいたデータ (1/15 - 2/14)
 TEACHER_DATA = {
     "2026-01-15": [("01:00", 54), ("08:19", 287), ("14:10", 163), ("19:19", 251)],
     "2026-01-16": [("02:00", 37), ("09:00", 309), ("15:00", 149), ("20:19", 260)],
@@ -52,22 +52,55 @@ TEACHER_DATA = {
     "2026-02-14": [("01:59", 51), ("08:59", 300), ("14:59", 140), ("20:19", 252)]
 }
 
+# データが存在する最後の日付を取得
+LAST_TEACHER_DATE = max([datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in TEACHER_DATA.keys()])
+
 # ==========================================
-# 3. スタイル設定
+# 3. スタイル設定 (スマホ対策・強化版)
 # ==========================================
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; padding-bottom: 3rem; }
     h5 { margin-bottom: 0px; }
-    /* スマホ対策 */
-    @media (max-width: 640px) {
-        div[data-testid="stHorizontalBlock"] { flex-direction: row !important; gap: 8px !important; }
-        div[data-testid="column"] { width: calc(50% - 4px) !important; flex: 0 0 calc(50% - 4px) !important; min-width: 0 !important; }
-        div.stButton > button { width: 100% !important; font-size: 0.9rem !important; padding: 0px !important; height: 2.8rem !important; white-space: nowrap !important; margin: 0px !important; }
+    
+    /* スマホ対策: flex-direction: row !important を徹底する
+       Streamlitのバージョンによってクラス名が変わる可能性があるため、
+       複数のセレクタで強制的に横並びを指定します。
+    */
+    
+    /* ボタンを含むカラムのコンテナ */
+    div[data-testid="stHorizontalBlock"] {
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        gap: 10px !important;
     }
-    div.stButton > button { width: 100%; margin-top: 0px; }
+    
+    /* 個々のカラム (ボタンの入れ物) */
+    div[data-testid="column"] {
+        width: 50% !important;
+        flex: 1 1 50% !important;
+        min-width: 0 !important;
+        padding: 0 !important;
+    }
+    
+    /* ボタン本体 */
+    div.stButton > button {
+        width: 100% !important;
+        font-size: 0.85rem !important; /* 少し文字を小さくして改行防止 */
+        padding: 0px !important;
+        height: 3.0rem !important;
+        white-space: nowrap !important;
+        margin-top: 0px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+def configure_font():
+    plt.rcParams.update(plt.rcParamsDefault)
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans', 'Verdana']
+configure_font()
 
 # ==========================================
 # 4. ロジック: 自己学習型 (Harmonic Analysis)
@@ -75,11 +108,9 @@ st.markdown("""
 class SelfLearningTideModel:
     def __init__(self, teacher_data, pressure_hpa=1013):
         self.pressure_correction = int(STANDARD_PRESSURE - pressure_hpa)
-        # 大西港データを学習
         self.constituents = self.learn_from_data(teacher_data)
         
     def learn_from_data(self, data_map):
-        """教師データ(大西港)から潮汐定数を逆算"""
         timestamps = []
         levels = []
         for date_str, peaks in data_map.items():
@@ -92,7 +123,7 @@ class SelfLearningTideModel:
         
         if not timestamps: return None
 
-        # 瀬戸内海・大西港の主要分潮近似 (M2, S2, K1, O1)
+        # 瀬戸内海・大西港の主要分潮近似
         speeds_deg_hr = [28.984, 30.000, 15.041, 13.943] 
         omegas = [s * (np.pi / 180) / 3600 for s in speeds_deg_hr]
         
@@ -112,7 +143,6 @@ class SelfLearningTideModel:
         }
 
     def predict_level(self, dt_obj):
-        """学習結果に基づき予測"""
         if not self.constituents: return 0
         t = dt_obj.timestamp()
         val = self.constituents["mean"]
@@ -165,7 +195,6 @@ class SelfLearningTideModel:
 @st.cache_data(ttl=3600)
 def get_current_pressure():
     try:
-        # 大崎上島(大西港付近)の座標
         url = f"https://api.openweathermap.org/data/2.5/weather?lat=34.23&lon=132.83&appid={OWM_API_KEY}&units=metric"
         return float(requests.get(url, timeout=3).json()['main']['pressure'])
     except: return 1013.0
@@ -183,7 +212,6 @@ def get_tide_name(m):
 # ==========================================
 if 'view_date' not in st.session_state:
     now = datetime.datetime.now() + datetime.timedelta(hours=9)
-    # デフォルトを今日に
     st.session_state['view_date'] = now.date()
 
 view_date = st.session_state['view_date']
@@ -213,87 +241,4 @@ st.markdown(f"""
  <div style="margin-top:5px;">
    <span style="color:#0066cc; font-weight:bold; font-size:1.1rem;">現在: {curr_now.strftime('%H:%M')} / {int(curr_lvl)}cm</span>
    <div style="font-size:0.8rem; color:#666; margin-top:3px;">
-    気圧:{int(pressure)}hPa (<span style="color:#d62728;">{adj_txt}cm</span>) | 大西港独自学習モデル(AI)
-   </div>
- </div>
-</div>
-""", unsafe_allow_html=True)
-
-c1, c2 = st.columns([1,1])
-if c1.button("< 前5日"): st.session_state['view_date'] -= datetime.timedelta(days=5)
-if c2.button("次5日 >"): st.session_state['view_date'] += datetime.timedelta(days=5)
-
-with st.sidebar:
-    st.header("⚙️ 設定")
-    st.info("✅ 予測モデル: 稼働中\n(大西港データ学習済み)")
-    st.markdown("---")
-    target_cm = st.number_input("作業可能潮位 (cm以下)", value=120, step=10)
-    start_h, end_h = st.slider("作業時間帯", 0, 24, (7, 23))
-    st.markdown("---")
-    if st.button("今日に戻る"): 
-        st.session_state['view_date'] = (datetime.datetime.now() + datetime.timedelta(hours=9)).date()
-
-# 作業可能判定
-df['hour'] = df['time'].dt.hour
-df['is_safe'] = (df['level'] <= target_cm) & (df['hour'] >= start_h) & (df['hour'] < end_h)
-
-safe_windows = []
-if df['is_safe'].any():
-    df['grp'] = (df['is_safe'] != df['is_safe'].shift()).cumsum()
-    for _, g in df[df['is_safe']].groupby('grp'):
-        s, e = g['time'].iloc[0], g['time'].iloc[-1]
-        if (e-s).total_seconds() >= 600:
-            min_l = g['level'].min()
-            min_t = g.loc[g['level'].idxmin(), 'time']
-            d = e - s
-            h, m = d.seconds//3600, (d.seconds%3600)//60
-            safe_windows.append({
-                "日付": s.strftime('%m/%d(%a)'),
-                "開始": s.strftime("%H:%M"),
-                "終了": e.strftime("%H:%M"),
-                "時間": f"{h}:{m:02}",
-                "gl": f"Work\n{h}:{m:02}",
-                "mt": min_t, "ml": min_l
-            })
-
-# グラフ描画
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(df['time'], df['level'], '#0066cc', lw=2, zorder=2, label="Level")
-ax.axhline(target_cm, c='orange', ls='--', lw=1.5, label='Limit')
-ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4)
-
-# ピーク注釈
-if not df_peaks.empty:
-    highs = df_peaks[df_peaks['type'] == 'H']
-    lows = df_peaks[df_peaks['type'] == 'L']
-    for _, r in highs.iterrows():
-        ax.scatter(r['time'], r['level'], c='red', marker='^', s=40, zorder=3)
-        off = 15 if r['time'].day % 2 == 0 else 35
-        ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#cc0000', fontweight='bold')
-    for _, r in lows.iterrows():
-        ax.scatter(r['time'], r['level'], c='blue', marker='v', s=40, zorder=3)
-        off = -25 if r['time'].day % 2 == 0 else -45
-        ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#0000cc', fontweight='bold')
-
-for w in safe_windows:
-    ax.annotate(w['gl'], (w['mt'], w['ml']), xytext=(0,-85), textcoords='offset points', ha='center', fontsize=8, color='#b8860b', fontweight='bold', bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
-
-ax.set_ylabel("Level (cm)")
-ax.grid(True, ls=':', alpha=0.6)
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-ax.set_ylim(bottom=df['level'].min() - 30, top=df['level'].max() + 50)
-plt.tight_layout()
-st.pyplot(fig)
-
-st.markdown("---")
-st.markdown(f"##### 📋 作業可能時間リスト (潮位 {target_cm}cm以下)")
-if safe_windows:
-    rdf = pd.DataFrame(safe_windows)
-    rdf_display = rdf[["日付", "開始", "終了", "時間"]]
-    cc = st.columns(2)
-    chunks = np.array_split(rdf_display, 2)
-    for i, col in enumerate(cc):
-        if i < len(chunks) and not chunks[i].empty:
-            col.dataframe(chunks[i], hide_index=True, use_container_width=True)
-else:
-    st.warning("この期間に作業可能な時間帯はありません。")
+    気圧:{int(pressure)}hPa (<span style="
