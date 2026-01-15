@@ -51,7 +51,6 @@ TEACHER_DATA = {
     "2026-02-13": [("00:40", 69), ("08:00", 277), ("14:09", 163), ("19:00", 233)],
     "2026-02-14": [("01:59", 51), ("08:59", 300), ("14:59", 140), ("20:19", 252)]
 }
-LAST_TEACHER_DATE = max([datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in TEACHER_DATA.keys()])
 
 # ==========================================
 # 3. サイトデータ取得機能
@@ -118,10 +117,13 @@ configure_font()
 class SelfLearningTideModel:
     def __init__(self, teacher_data, manual_data_str, pressure_hpa=1013):
         self.pressure_correction = int(STANDARD_PRESSURE - pressure_hpa)
+        
+        # データの結合
         combined_data = teacher_data.copy()
         manual_parsed = self.parse_manual_input(manual_data_str)
         for k, v in manual_parsed.items():
             combined_data[k] = v
+            
         self.constituents = self.learn_from_data(combined_data)
         self.raw_data = combined_data 
         
@@ -206,6 +208,13 @@ class SelfLearningTideModel:
                 last_t = p['time']
         return pd.DataFrame(res)
 
+    # データの最終日を取得するメソッド
+    def get_max_date(self):
+        if not self.raw_data:
+            return None
+        all_dates = [datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in self.raw_data.keys()]
+        return max(all_dates)
+
 # ==========================================
 # 6. UI & 実行
 # ==========================================
@@ -232,8 +241,25 @@ if 'manual_input_text' not in st.session_state:
 view_date = st.session_state['view_date']
 st.markdown("<h5 style='margin-bottom:5px;'>⚓ 大西港フェリーターミナル 潮汐予測</h5>", unsafe_allow_html=True)
 
+# --------------------------------------------------------------------------
+# モデルの準備とデータ期間の計算 (サイドバー表示用)
+# --------------------------------------------------------------------------
+pressure = get_current_pressure()
+model = SelfLearningTideModel(TEACHER_DATA, st.session_state['manual_input_text'], pressure)
+data_max_date = model.get_max_date()
+
+# --------------------------------------------------------------------------
+# サイドバー
+# --------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ 設定")
+    
+    # 登録済みデータの期間を表示
+    if data_max_date:
+        st.success(f"📊 データ登録済み期間:\n～ {data_max_date.strftime('%Y/%m/%d')}")
+    else:
+        st.warning("データがありません")
+
     st.subheader("🛠 データ不足時の対応")
     with st.expander("将来のデータを追加する", expanded=False):
         fetch_url = st.text_input("URLから取得 (釣割など)", value="https://tide.chowari.jp/34/344311/22694/")
@@ -254,8 +280,7 @@ with st.sidebar:
     st.markdown("---")
     if st.button("今日に戻る"): st.session_state['view_date'] = (datetime.datetime.now() + datetime.timedelta(hours=9)).date()
 
-pressure = get_current_pressure()
-model = SelfLearningTideModel(TEACHER_DATA, st.session_state['manual_input_text'], pressure)
+# データ生成
 df = model.get_dataframe(view_date, 5)
 df_peaks = model.get_peaks(view_date, 5)
 
@@ -300,8 +325,11 @@ if df['is_safe'].any():
 
 fig, ax = plt.subplots(figsize=(10, 5))
 all_known_dates = list(model.raw_data.keys())
-max_known_date = max([datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in all_known_dates])
-teacher_end_dt = datetime.datetime.combine(max_known_date, datetime.time(23,59,59))
+if all_known_dates:
+    max_known_date = max([datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in all_known_dates])
+    teacher_end_dt = datetime.datetime.combine(max_known_date, datetime.time(23,59,59))
+else:
+    teacher_end_dt = datetime.datetime(2000,1,1) # dummy
 
 ax.plot(df['time'], df['level'], '#0066cc', lw=1.5, ls='--', label="AI Forecast", zorder=1)
 df_solid = df[df['time'] <= teacher_end_dt]
@@ -316,7 +344,7 @@ if df['time'].iloc[0] <= teacher_end_dt <= df['time'].iloc[-1]:
 ax.axhline(target_cm, c='orange', ls='--', lw=1.5, label='Limit')
 ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4)
 
-# 【復活】現在位置のプロット (黄色い丸)
+# 現在位置のプロット (黄色い丸)
 gs, ge = df['time'].iloc[0], df['time'].iloc[-1]
 if gs <= curr_now <= ge:
     ax.scatter(curr_now, curr_lvl, c='gold', edgecolors='black', s=120, zorder=10, label="Now")
@@ -339,4 +367,21 @@ for w in safe_windows:
 ax.set_ylabel("Level (cm)")
 ax.grid(True, ls=':', alpha=0.6)
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-ax.set_ylim(
+# エラー修正箇所: カッコを確実に閉じる
+ax.set_ylim(bottom=df['level'].min() - 30, top=df['level'].max() + 50)
+
+plt.tight_layout()
+st.pyplot(fig)
+
+st.markdown("---")
+st.markdown(f"##### 📋 作業可能時間リスト (潮位 {target_cm}cm以下)")
+if safe_windows:
+    rdf = pd.DataFrame(safe_windows)
+    rdf_display = rdf[["日付", "開始", "終了", "時間"]]
+    cc = st.columns(2)
+    chunks = np.array_split(rdf_display, 2)
+    for i, col in enumerate(cc):
+        if i < len(chunks) and not chunks[i].empty:
+            col.dataframe(chunks[i], hide_index=True, use_container_width=True)
+else:
+    st.warning("この期間に作業可能な時間帯はありません。")
