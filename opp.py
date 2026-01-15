@@ -15,13 +15,14 @@ st.set_page_config(layout="wide", page_title="大西港 潮汐予測")
 # APIキー (OpenWeatherMap)
 OWM_API_KEY = "f8b87c403597b305f1bbf48a3bdf8dcb"
 
-# 補正ロジック定数
-TIME_OFFSET_MIN = 1       # 時間補正 +1分
-LEVEL_BASE_OFFSET = 13    # 基準面補正 +13cm
+# 【重要】補正ロジックの修正
+# Tide Graph BI (竹原) のデータに合わせるため、固定の補正値を撤廃しました。
+TIME_OFFSET_MIN = 0       # 時間補正なし (竹原そのまま)
+LEVEL_BASE_OFFSET = 0     # 基準面補正なし (竹原そのまま)
 STANDARD_PRESSURE = 1013  # 標準気圧
 
 # ==========================================
-# 2. スタイル & フォント設定 (スマホ横並び強制版)
+# 2. スタイル & フォント設定
 # ==========================================
 st.markdown("""
 <style>
@@ -29,38 +30,32 @@ st.markdown("""
     .block-container { padding-top: 1rem; padding-bottom: 3rem; }
     h5 { margin-bottom: 0px; }
 
-    /* 【重要】スマホで強制的に横並びにする強力なCSS */
+    /* スマホ対策: ボタンとカラムのスタイル */
     @media (max-width: 640px) {
-        /* カラムの入れ物（HorizontalBlock）を強制的に横並び(row)にする */
         div[data-testid="stHorizontalBlock"] {
             flex-direction: row !important;
             flex-wrap: nowrap !important;
-            gap: 0.5rem !important;
+            gap: 8px !important;
+            padding-right: 0px !important;
         }
-        /* 各カラムの幅を均等に強制する */
         div[data-testid="column"] {
-            width: auto !important;
-            flex: 1 1 auto !important;
+            width: calc(50% - 4px) !important;
+            flex: 0 0 calc(50% - 4px) !important;
             min-width: 0 !important;
         }
-        /* ボタンの文字サイズを少し小さくして収まりやすくする */
         div.stButton > button {
-            font-size: 0.85rem !important;
+            width: 100% !important;
+            font-size: 0.9rem !important;
             padding: 0px !important;
             height: 2.8rem !important;
-            white-space: nowrap !important; /* 折り返し禁止 */
+            white-space: nowrap !important;
+            margin: 0px !important;
         }
     }
-    
-    /* PCなど通常時のボタン設定 */
-    div.stButton > button { 
-        width: 100%; 
-        margin-top: 0px;
-    }
+    div.stButton > button { width: 100%; margin-top: 0px; }
 </style>
 """, unsafe_allow_html=True)
 
-# グラフのフォント設定（英語フォントを指定して□化けを防ぐ）
 def configure_font():
     plt.rcParams.update(plt.rcParamsDefault)
     plt.rcParams['font.family'] = 'sans-serif'
@@ -73,7 +68,8 @@ configure_font()
 
 @st.cache_data(ttl=3600)
 def get_current_pressure():
-    lat, lon = 34.234, 132.831
+    # 大崎上島・竹原周辺
+    lat, lon = 34.30, 132.90
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OWM_API_KEY}&units=metric"
     try:
         res = requests.get(url, timeout=3)
@@ -85,6 +81,7 @@ def get_current_pressure():
 
 @st.cache_data(ttl=3600)
 def fetch_jma_data_map(year):
+    # 竹原 (344311) のデータを取得
     url = f"https://www.data.jma.go.jp/kaiyou/data/db/tide/suisan/txt/{year}/344311.txt"
     headers = {"User-Agent": "Mozilla/5.0"}
     data_map = {}
@@ -104,7 +101,7 @@ def fetch_jma_data_map(year):
     return data_map
 
 # ==========================================
-# 4. 高精度スプライン補間 (Catmull-Rom)
+# 4. 高精度スプライン補間 (滑らかなグラフ用)
 # ==========================================
 def catmull_rom_spline(p0, p1, p2, p3, n_points=30):
     t = np.linspace(0, 1, n_points)
@@ -119,7 +116,6 @@ def catmull_rom_spline(p0, p1, p2, p3, n_points=30):
     return a*t3 + b*t2 + c*t + d
 
 def generate_smooth_curve(timestamps, hourly_levels):
-    """毎時データをなめらかな曲線にする"""
     y = hourly_levels
     y_padded = [y[0]] + y + [y[-1]]
     smooth_times = []
@@ -138,20 +134,33 @@ def generate_smooth_curve(timestamps, hourly_levels):
     return pd.DataFrame({"time": smooth_times, "level": smooth_levels})
 
 # ==========================================
-# 5. ヘルパー関数
+# 5. ヘルパー関数 (潮名ロジック修正)
 # ==========================================
 def get_moon_age(date_obj):
     base = datetime.date(2000, 1, 6)
     return ((date_obj - base).days) % 29.53059
 
 def get_tide_name(moon_age):
+    # Tide Graph BI (釣割) の定義に近づける
     m = int(moon_age)
     if m >= 30: m -= 30
-    if 0<=m<=2 or 14<=m<=17 or 29<=m<=30: return "大潮"
-    elif 3<=m<=5 or 18<=m<=20: return "中潮"
-    elif 6<=m<=9 or 21<=m<=24: return "小潮"
-    elif 10<=m<=12: return "長潮"
-    elif m==13 or 25<=m<=28: return "若潮"
+    
+    # 釣割/MIRC方式に近い定義
+    # 大潮: 29.5-2.5, 13.5-16.5 (月齢0,1,2, 14,15,16,17あたり)
+    if m >= 28 or m <= 2: return "大潮" # 1/17(月齢28)～1/20(月齢1)をカバー
+    if 13 <= m <= 17: return "大潮"
+    
+    if 3 <= m <= 5: return "中潮"
+    if 18 <= m <= 20: return "中潮"
+    
+    if 6 <= m <= 9: return "小潮"
+    if 21 <= m <= 24: return "小潮"
+    
+    if 10 <= m <= 12: return "長潮"
+    if m == 25: return "長潮"
+    
+    if m == 13 or 26 <= m <= 27: return "若潮"
+    
     return "中潮"
 
 def deduplicate_peaks(df_peaks, min_dist_mins=60):
@@ -170,16 +179,18 @@ def deduplicate_peaks(df_peaks, min_dist_mins=60):
 class OnishiTideModel:
     def __init__(self, pressure_hpa, year=2026):
         self.jma_map = fetch_jma_data_map(year)
+        # 潮位補正: 基本0 + 気圧分のみ
         self.pressure_correction = int(STANDARD_PRESSURE - pressure_hpa)
         self.total_level_offset = LEVEL_BASE_OFFSET + self.pressure_correction
         self.time_offset = TIME_OFFSET_MIN
     
     def get_backup_level(self, dt):
+        # データ欠落時用の計算式 (竹原の潮位に近いパラメータ)
         epoch = datetime.datetime(2026, 1, 1, 0, 0)
         delta_h = (dt - epoch).total_seconds() / 3600.0
         level = 180 
-        level += 110 * math.cos(2 * math.pi * delta_h / 12.42 - 1.0) 
-        level += 40 * math.cos(2 * math.pi * delta_h / 24.0 - 2.0)
+        level += 120 * math.cos(2 * math.pi * delta_h / 12.42 - 0.5) 
+        level += 50 * math.cos(2 * math.pi * delta_h / 24.0 - 1.5)
         return int(level)
 
     def get_dataframe(self, start_date, days=5):
@@ -230,7 +241,7 @@ if 'view_date' not in st.session_state:
         st.session_state['view_date'] = now_jst.date()
 
 view_date = st.session_state['view_date']
-st.markdown("<h5 style='margin-bottom:5px;'>⚓ 大西港 潮汐予測</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='margin-bottom:5px;'>⚓ 大西港 潮汐予測 (Tide Graph BI整合版)</h5>", unsafe_allow_html=True)
 
 current_pressure = get_current_pressure()
 model = OnishiTideModel(pressure_hpa=current_pressure, year=2026)
@@ -240,7 +251,9 @@ curr_time, curr_lvl = model.get_current_level(df)
 ma = get_moon_age(view_date)
 tn = get_tide_name(ma)
 p_diff = int(1013 - current_pressure)
+# 補正値の表示ロジック（0の場合はプラスをつけないなど）
 adj_txt = f"+{p_diff}" if p_diff > 0 else f"{p_diff}"
+base_txt = f"+{LEVEL_BASE_OFFSET}"
 
 st.markdown(f"""
 <div style="font-size:0.9rem; background:#f8f9fa; padding:10px; border:1px solid #ddd; margin-bottom:10px; border-radius:5px;">
@@ -248,15 +261,15 @@ st.markdown(f"""
  <div style="margin-top:5px;">
    <span style="color:#0066cc; font-weight:bold; font-size:1.1rem;">現在: {curr_time.strftime('%H:%M')} / {int(curr_lvl)}cm</span>
    <div style="font-size:0.8rem; color:#666; margin-top:3px;">
-    気圧:{int(current_pressure)}hPa (<span style="color:#d62728;">{adj_txt}cm</span>) + 地形差 <span style="color:#2ca02c;">+13cm</span>
+    気圧:{int(current_pressure)}hPa (<span style="color:#d62728;">{adj_txt}cm</span>)
+    (竹原データ準拠・固定補正なし)
    </div>
  </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ナビゲーション (スマホ横並び対応)
+# ナビゲーション
 c1, c2 = st.columns([1,1])
-# 文字を短くしてボタン幅を節約
 if c1.button("< 前5日"): st.session_state['view_date'] -= datetime.timedelta(days=5)
 if c2.button("次5日 >"): st.session_state['view_date'] += datetime.timedelta(days=5)
 
@@ -354,7 +367,6 @@ if safe_windows:
     rdf = pd.DataFrame(safe_windows)
     rdf_display = rdf[["日付", "開始", "終了", "時間"]]
     
-    # スマホ対応: 強制的に2列に分ける
     cc = st.columns(2)
     chunks = np.array_split(rdf_display, 2)
     for i, col in enumerate(cc):
