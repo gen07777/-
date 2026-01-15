@@ -241,4 +241,107 @@ st.markdown(f"""
  <div style="margin-top:5px;">
    <span style="color:#0066cc; font-weight:bold; font-size:1.1rem;">現在: {curr_now.strftime('%H:%M')} / {int(curr_lvl)}cm</span>
    <div style="font-size:0.8rem; color:#666; margin-top:3px;">
-    気圧:{int(pressure)}hPa (<span style="
+    気圧:{int(pressure)}hPa (<span style="color:#d62728;">{adj_txt}cm</span>) | AIモデル稼働中
+   </div>
+ </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ボタンエリア (スマホ対策適用)
+c1, c2 = st.columns([1,1])
+if c1.button("< 前5日"): st.session_state['view_date'] -= datetime.timedelta(days=5)
+if c2.button("次5日 >"): st.session_state['view_date'] += datetime.timedelta(days=5)
+
+with st.sidebar:
+    st.header("⚙️ 設定")
+    st.info(f"学習データ範囲:\n~ {LAST_TEACHER_DATE.strftime('%Y/%m/%d')}")
+    st.markdown("---")
+    target_cm = st.number_input("作業可能潮位 (cm以下)", value=120, step=10)
+    start_h, end_h = st.slider("作業時間帯", 0, 24, (7, 23))
+    st.markdown("---")
+    if st.button("今日に戻る"): 
+        st.session_state['view_date'] = (datetime.datetime.now() + datetime.timedelta(hours=9)).date()
+
+# 作業可能判定
+df['hour'] = df['time'].dt.hour
+df['is_safe'] = (df['level'] <= target_cm) & (df['hour'] >= start_h) & (df['hour'] < end_h)
+
+safe_windows = []
+if df['is_safe'].any():
+    df['grp'] = (df['is_safe'] != df['is_safe'].shift()).cumsum()
+    for _, g in df[df['is_safe']].groupby('grp'):
+        s, e = g['time'].iloc[0], g['time'].iloc[-1]
+        if (e-s).total_seconds() >= 600:
+            min_l = g['level'].min()
+            min_t = g.loc[g['level'].idxmin(), 'time']
+            d = e - s
+            h, m = d.seconds//3600, (d.seconds%3600)//60
+            safe_windows.append({
+                "日付": s.strftime('%m/%d(%a)'),
+                "開始": s.strftime("%H:%M"),
+                "終了": e.strftime("%H:%M"),
+                "時間": f"{h}:{m:02}",
+                "gl": f"Work\n{h}:{m:02}",
+                "mt": min_t, "ml": min_l
+            })
+
+# グラフ描画 (予測エリアの可視化)
+fig, ax = plt.subplots(figsize=(10, 5))
+
+# データを「学習済み範囲」と「予測範囲」に分ける
+# LAST_TEACHER_DATE までは実線、それ以降は点線
+teacher_end_dt = datetime.datetime.combine(LAST_TEACHER_DATE, datetime.time(23,59,59))
+
+# 全体を描画 (点線で下書き)
+ax.plot(df['time'], df['level'], '#0066cc', lw=1.5, ls='--', label="AI Forecast", zorder=1)
+
+# 学習データがある期間だけ実線で上書き
+df_solid = df[df['time'] <= teacher_end_dt]
+if not df_solid.empty:
+    ax.plot(df_solid['time'], df_solid['level'], '#0066cc', lw=2, label="Actual Data", zorder=2)
+
+# 予測開始ラインを表示
+if df['time'].iloc[0] <= teacher_end_dt <= df['time'].iloc[-1]:
+    ax.axvline(teacher_end_dt, color='gray', linestyle=':', alpha=0.7)
+    # グラフの上部に注釈
+    y_max = df['level'].max()
+    ax.text(teacher_end_dt, y_max + 10, "  <- Actual | Forecast ->", color='gray', fontsize=9, ha='center')
+
+ax.axhline(target_cm, c='orange', ls='--', lw=1.5, label='Limit')
+ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4)
+
+# ピーク注釈
+if not df_peaks.empty:
+    highs = df_peaks[df_peaks['type'] == 'H']
+    lows = df_peaks[df_peaks['type'] == 'L']
+    for _, r in highs.iterrows():
+        ax.scatter(r['time'], r['level'], c='red', marker='^', s=40, zorder=3)
+        off = 15 if r['time'].day % 2 == 0 else 35
+        ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#cc0000', fontweight='bold')
+    for _, r in lows.iterrows():
+        ax.scatter(r['time'], r['level'], c='blue', marker='v', s=40, zorder=3)
+        off = -25 if r['time'].day % 2 == 0 else -45
+        ax.annotate(f"{r['time'].strftime('%H:%M')}\n{int(r['level'])}", (r['time'], r['level']), xytext=(0,off), textcoords='offset points', ha='center', fontsize=8, color='#0000cc', fontweight='bold')
+
+for w in safe_windows:
+    ax.annotate(w['gl'], (w['mt'], w['ml']), xytext=(0,-85), textcoords='offset points', ha='center', fontsize=8, color='#b8860b', fontweight='bold', bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.7))
+
+ax.set_ylabel("Level (cm)")
+ax.grid(True, ls=':', alpha=0.6)
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
+ax.set_ylim(bottom=df['level'].min() - 30, top=df['level'].max() + 50)
+plt.tight_layout()
+st.pyplot(fig)
+
+st.markdown("---")
+st.markdown(f"##### 📋 作業可能時間リスト (潮位 {target_cm}cm以下)")
+if safe_windows:
+    rdf = pd.DataFrame(safe_windows)
+    rdf_display = rdf[["日付", "開始", "終了", "時間"]]
+    cc = st.columns(2)
+    chunks = np.array_split(rdf_display, 2)
+    for i, col in enumerate(cc):
+        if i < len(chunks) and not chunks[i].empty:
+            col.dataframe(chunks[i], hide_index=True, use_container_width=True)
+else:
+    st.warning("この期間に作業可能な時間帯はありません。")
