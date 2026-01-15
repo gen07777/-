@@ -54,73 +54,40 @@ TEACHER_DATA = {
 LAST_TEACHER_DATE = max([datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in TEACHER_DATA.keys()])
 
 # ==========================================
-# 3. サイトデータ取得機能 (Scraping)
+# 3. サイトデータ取得機能
 # ==========================================
 def scrape_chowari_data(url):
-    """指定されたURL(釣割)から潮汐データを取得してテキスト形式で返す"""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
-        
-        # HTML内のテーブルをすべて取得
         dfs = pd.read_html(res.text)
-        
-        # 潮汐データっぽいテーブルを探す (「満潮」「干潮」が含まれるもの)
         target_df = None
         for df in dfs:
-            # カラムを文字列にして結合し、キーワードが含まれるか確認
             cols_str = " ".join([str(c) for c in df.columns])
             if "満潮" in cols_str and "干潮" in cols_str:
                 target_df = df
                 break
+        if target_df is None: return "エラー: データが見つかりませんでした。"
         
-        if target_df is None:
-            return "エラー: 潮見表データが見つかりませんでした。"
-            
-        # データの整形
         result_text = ""
-        # 2026年と仮定 (アプリの仕様上)
         year = 2026 
-        
         for _, row in target_df.iterrows():
-            # 日付の抽出 (例: "1月16日(金)")
             date_raw = str(row.iloc[0])
             m_match = re.search(r'(\d+)月(\d+)日', date_raw)
             if not m_match: continue
-            
             mon, day = map(int, m_match.groups())
             date_str = f"{year}-{mon:02d}-{day:02d}"
-            
-            # 行全体から時刻(XX:XX)と潮位(XXXcm)のペアを探す
             row_str = " ".join([str(x) for x in row.values])
-            # 時刻と潮位のペアを抽出 (例: 09:00 309cm)
-            # 正規表現: 時刻っぽいもの + スペース + 数字 + cm
-            # ただしテーブル構造が複雑なため、単純に「時刻」と「数値」を拾う
-            
-            # 行内のすべてのセルを見て、時刻形式と数値形式をペアリングする簡易ロジック
-            # 釣割のテーブルは [日時, 満潮時間, 満潮潮位, ..., 干潮時間, 干潮潮位...] の並びが多い
-            
-            # より確実な方法: 
-            # セルの中身を正規表現で走査
-            # \d{1,2}:\d{2}  -> 時刻
-            # \d{1,3}cm -> 潮位
-            
             times = re.findall(r'(\d{1,2}:\d{2})', row_str)
             levels = re.findall(r'(\d{1,3})cm', row_str)
-            
-            # 時刻と潮位の数が合わない場合は、順番通りに結合 (概ね合致する)
             count = min(len(times), len(levels))
             for i in range(count):
                 result_text += f"{date_str} {times[i]} {levels[i]}\n"
-                
-        if not result_text:
-            return "エラー: データの日付・時刻形式を解析できませんでした。"
-            
+        if not result_text: return "エラー: 解析できませんでした。"
         return result_text.strip()
-        
     except Exception as e:
-        return f"エラー: データ取得に失敗しました ({str(e)})"
+        return f"エラー: {str(e)}"
 
 # ==========================================
 # 4. スタイル設定
@@ -146,22 +113,17 @@ def configure_font():
 configure_font()
 
 # ==========================================
-# 5. ロジック: 自己学習型 (Harmonic Analysis)
+# 5. ロジック: 自己学習型
 # ==========================================
 class SelfLearningTideModel:
     def __init__(self, teacher_data, manual_data_str, pressure_hpa=1013):
         self.pressure_correction = int(STANDARD_PRESSURE - pressure_hpa)
-        
-        # 教師データと手動入力データをマージ
         combined_data = teacher_data.copy()
         manual_parsed = self.parse_manual_input(manual_data_str)
-        
-        # 手動入力を優先して上書き
         for k, v in manual_parsed.items():
             combined_data[k] = v
-            
         self.constituents = self.learn_from_data(combined_data)
-        self.raw_data = combined_data # プロット用
+        self.raw_data = combined_data 
         
     def parse_manual_input(self, text):
         data = {}
@@ -187,26 +149,16 @@ class SelfLearningTideModel:
                 dt = base.replace(hour=h, minute=m)
                 timestamps.append(dt.timestamp())
                 levels.append(lvl)
-        
         if not timestamps: return None
-
         speeds_deg_hr = [28.984, 30.000, 15.041, 13.943] 
         omegas = [s * (np.pi / 180) / 3600 for s in speeds_deg_hr]
-        
         t = np.array(timestamps)
         y = np.array(levels)
-        
         A = np.ones((len(t), 1))
         for w in omegas:
             A = np.hstack([A, np.cos(w * t)[:, None], np.sin(w * t)[:, None]])
-            
         coeffs, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
-        
-        return {
-            "mean": coeffs[0],
-            "omegas": omegas,
-            "coeffs": coeffs[1:]
-        }
+        return {"mean": coeffs[0], "omegas": omegas, "coeffs": coeffs[1:]}
 
     def predict_level(self, dt_obj):
         if not self.constituents: return 0
@@ -246,7 +198,6 @@ class SelfLearningTideModel:
                 peaks.append({"time": pd.to_datetime(times[i]), "level": val, "type": "H"})
             elif val == np.min(levels[i-window:i+window+1]) and val < self.constituents["mean"]:
                 peaks.append({"time": pd.to_datetime(times[i]), "level": val, "type": "L"})
-        
         res = []
         last_t = None
         for p in peaks:
@@ -275,66 +226,39 @@ def get_tide_name(m):
 
 if 'view_date' not in st.session_state:
     st.session_state['view_date'] = (datetime.datetime.now() + datetime.timedelta(hours=9)).date()
-
 if 'manual_input_text' not in st.session_state:
     st.session_state['manual_input_text'] = ""
 
 view_date = st.session_state['view_date']
 st.markdown("<h5 style='margin-bottom:5px;'>⚓ 大西港フェリーターミナル 潮汐予測</h5>", unsafe_allow_html=True)
 
-# ----------------------------
-# サイドバー (手動入力 & 取得)
-# ----------------------------
 with st.sidebar:
     st.header("⚙️ 設定")
-    
-    # 取得URL入力
-    st.markdown("---")
     st.subheader("🛠 データ不足時の対応")
     with st.expander("将来のデータを追加する", expanded=False):
         fetch_url = st.text_input("URLから取得 (釣割など)", value="https://tide.chowari.jp/34/344311/22694/")
-        
         if st.button("データ取得 (Scrape)"):
             with st.spinner("データを解析中..."):
                 scraped_text = scrape_chowari_data(fetch_url)
-                if "エラー" in scraped_text:
-                    st.error(scraped_text)
+                if "エラー" in scraped_text: st.error(scraped_text)
                 else:
                     st.success("取得成功！下の欄に追加しました。")
-                    # 既存の入力がある場合は追記、なければ新規
-                    if st.session_state['manual_input_text']:
-                        st.session_state['manual_input_text'] += "\n" + scraped_text
-                    else:
-                        st.session_state['manual_input_text'] = scraped_text
-
+                    if st.session_state['manual_input_text']: st.session_state['manual_input_text'] += "\n" + scraped_text
+                    else: st.session_state['manual_input_text'] = scraped_text
         st.caption("手動入力またはURL取得したデータ:")
-        # テキストエリア (session_stateと連動)
-        manual_input = st.text_area(
-            "追加データ (YYYY-MM-DD HH:MM Level)",
-            value=st.session_state['manual_input_text'],
-            height=200,
-            key="manual_input_area"
-        )
-        # 入力内容を保存 (on_changeが使えない場合のための同期)
+        manual_input = st.text_area("追加データ (YYYY-MM-DD HH:MM Level)", value=st.session_state['manual_input_text'], height=200, key="manual_input_area")
         st.session_state['manual_input_text'] = manual_input
-
     st.markdown("---")
     target_cm = st.number_input("作業可能潮位 (cm以下)", value=120, step=10)
     start_h, end_h = st.slider("作業時間帯", 0, 24, (7, 23))
     st.markdown("---")
-    if st.button("今日に戻る"): 
-        st.session_state['view_date'] = (datetime.datetime.now() + datetime.timedelta(hours=9)).date()
+    if st.button("今日に戻る"): st.session_state['view_date'] = (datetime.datetime.now() + datetime.timedelta(hours=9)).date()
 
-# 予測エンジンの起動
 pressure = get_current_pressure()
-# 教師データ + 手動入力データを合わせてモデル作成
 model = SelfLearningTideModel(TEACHER_DATA, st.session_state['manual_input_text'], pressure)
-
-# データ生成
 df = model.get_dataframe(view_date, 5)
 df_peaks = model.get_peaks(view_date, 5)
 
-# 現在値
 curr_now = datetime.datetime.now() + datetime.timedelta(hours=9)
 curr_now = curr_now.replace(tzinfo=None)
 curr_lvl = model.predict_level(curr_now)
@@ -356,15 +280,12 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ナビゲーション
 c1, c2 = st.columns([1,1])
 if c1.button("< 前5日"): st.session_state['view_date'] -= datetime.timedelta(days=5)
 if c2.button("次5日 >"): st.session_state['view_date'] += datetime.timedelta(days=5)
 
-# 作業可能判定
 df['hour'] = df['time'].dt.hour
 df['is_safe'] = (df['level'] <= target_cm) & (df['hour'] >= start_h) & (df['hour'] < end_h)
-
 safe_windows = []
 if df['is_safe'].any():
     df['grp'] = (df['is_safe'] != df['is_safe'].shift()).cumsum()
@@ -375,27 +296,14 @@ if df['is_safe'].any():
             min_t = g.loc[g['level'].idxmin(), 'time']
             d = e - s
             h, m = d.seconds//3600, (d.seconds%3600)//60
-            safe_windows.append({
-                "日付": s.strftime('%m/%d(%a)'),
-                "開始": s.strftime("%H:%M"),
-                "終了": e.strftime("%H:%M"),
-                "時間": f"{h}:{m:02}",
-                "gl": f"Work\n{h}:{m:02}",
-                "mt": min_t, "ml": min_l
-            })
+            safe_windows.append({"日付": s.strftime('%m/%d(%a)'), "開始": s.strftime("%H:%M"), "終了": e.strftime("%H:%M"), "時間": f"{h}:{m:02}", "gl": f"Work\n{h}:{m:02}", "mt": min_t, "ml": min_l})
 
-# グラフ描画
 fig, ax = plt.subplots(figsize=(10, 5))
-
-# 実データ範囲の特定 (教師データ + 手動入力)
 all_known_dates = list(model.raw_data.keys())
 max_known_date = max([datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in all_known_dates])
 teacher_end_dt = datetime.datetime.combine(max_known_date, datetime.time(23,59,59))
 
-# 予測線 (点線)
 ax.plot(df['time'], df['level'], '#0066cc', lw=1.5, ls='--', label="AI Forecast", zorder=1)
-
-# 実績線 (実線) - データがある期間のみ
 df_solid = df[df['time'] <= teacher_end_dt]
 if not df_solid.empty:
     ax.plot(df_solid['time'], df_solid['level'], '#0066cc', lw=2, label="Actual Data", zorder=2)
@@ -407,6 +315,11 @@ if df['time'].iloc[0] <= teacher_end_dt <= df['time'].iloc[-1]:
 
 ax.axhline(target_cm, c='orange', ls='--', lw=1.5, label='Limit')
 ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4)
+
+# 【復活】現在位置のプロット (黄色い丸)
+gs, ge = df['time'].iloc[0], df['time'].iloc[-1]
+if gs <= curr_now <= ge:
+    ax.scatter(curr_now, curr_lvl, c='gold', edgecolors='black', s=120, zorder=10, label="Now")
 
 if not df_peaks.empty:
     highs = df_peaks[df_peaks['type'] == 'H']
@@ -426,19 +339,4 @@ for w in safe_windows:
 ax.set_ylabel("Level (cm)")
 ax.grid(True, ls=':', alpha=0.6)
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-ax.set_ylim(bottom=df['level'].min() - 30, top=df['level'].max() + 50)
-plt.tight_layout()
-st.pyplot(fig)
-
-st.markdown("---")
-st.markdown(f"##### 📋 作業可能時間リスト (潮位 {target_cm}cm以下)")
-if safe_windows:
-    rdf = pd.DataFrame(safe_windows)
-    rdf_display = rdf[["日付", "開始", "終了", "時間"]]
-    cc = st.columns(2)
-    chunks = np.array_split(rdf_display, 2)
-    for i, col in enumerate(cc):
-        if i < len(chunks) and not chunks[i].empty:
-            col.dataframe(chunks[i], hide_index=True, use_container_width=True)
-else:
-    st.warning("この期間に作業可能な時間帯はありません。")
+ax.set_ylim(
