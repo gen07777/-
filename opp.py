@@ -18,6 +18,7 @@ STANDARD_PRESSURE = 1013
 # ==========================================
 # 2. 教師データ (大西港フェリーターミナル)
 # ==========================================
+# ベースとなる学習データ (1/15 - 2/14)
 TEACHER_DATA = {
     "2026-01-15": [("01:00", 54), ("08:19", 287), ("14:10", 163), ("19:19", 251)],
     "2026-01-16": [("02:00", 37), ("09:00", 309), ("15:00", 149), ("20:19", 260)],
@@ -53,40 +54,55 @@ TEACHER_DATA = {
 }
 
 # ==========================================
-# 3. サイトデータ取得機能
+# 3. スプレッドシート読み込み機能
 # ==========================================
-def scrape_chowari_data(url):
+@st.cache_data(ttl=600) # 10分間キャッシュ
+def fetch_sheet_data(csv_url):
+    """Googleスプレッドシート(CSV公開)からデータを読み込む"""
+    if not csv_url:
+        return {}
+    
+    data_map = {}
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
-        res.encoding = res.apparent_encoding
-        dfs = pd.read_html(res.text)
-        target_df = None
-        for df in dfs:
-            cols_str = " ".join([str(c) for c in df.columns])
-            if "満潮" in cols_str and "干潮" in cols_str:
-                target_df = df
-                break
-        if target_df is None: return "エラー: データが見つかりませんでした。"
+        # pandasでCSVとして読み込む
+        # ヘッダーなし(A,B,C列)を想定。エラー回避のため列名指定は柔軟に。
+        # A列:日付, B列:時間, C列:潮位
+        df = pd.read_csv(csv_url, header=None)
         
-        result_text = ""
-        year = 2026 
-        for _, row in target_df.iterrows():
-            date_raw = str(row.iloc[0])
-            m_match = re.search(r'(\d+)月(\d+)日', date_raw)
-            if not m_match: continue
-            mon, day = map(int, m_match.groups())
-            date_str = f"{year}-{mon:02d}-{day:02d}"
-            row_str = " ".join([str(x) for x in row.values])
-            times = re.findall(r'(\d{1,2}:\d{2})', row_str)
-            levels = re.findall(r'(\d{1,3})cm', row_str)
-            count = min(len(times), len(levels))
-            for i in range(count):
-                result_text += f"{date_str} {times[i]} {levels[i]}\n"
-        if not result_text: return "エラー: 解析できませんでした。"
-        return result_text.strip()
+        # 必要な3列だけ抽出 (念のため)
+        df = df.iloc[:, :3]
+        df.columns = ["date", "time", "level"]
+        
+        # データの解析
+        for _, row in df.iterrows():
+            try:
+                # 日付の正規化
+                d_str = pd.to_datetime(row['date'], errors='coerce')
+                if pd.isnull(d_str): continue
+                d_str = d_str.strftime("%Y-%m-%d")
+                
+                t_str = str(row['time']).strip()
+                
+                # 潮位のクリーニング ("300cm" -> 300)
+                l_val = row['level']
+                if isinstance(l_val, str):
+                    l_str = l_val.lower().replace("cm", "").strip()
+                    lvl = int(float(l_str))
+                else:
+                    lvl = int(l_val)
+                
+                if d_str not in data_map:
+                    data_map[d_str] = []
+                data_map[d_str].append((t_str, lvl))
+                
+            except:
+                continue
+                
     except Exception as e:
-        return f"エラー: {str(e)}"
+        # 読み込み失敗時は空を返してアプリを止めない
+        return {}
+        
+    return data_map
 
 # ==========================================
 # 4. スタイル設定
@@ -115,52 +131,49 @@ configure_font()
 # 5. ロジック: 自己学習型
 # ==========================================
 class SelfLearningTideModel:
-    def __init__(self, teacher_data, manual_data_str, pressure_hpa=1013):
+    def __init__(self, teacher_data, sheet_data, pressure_hpa=1013):
         self.pressure_correction = int(STANDARD_PRESSURE - pressure_hpa)
         
         # データの結合
         combined_data = teacher_data.copy()
-        manual_parsed = self.parse_manual_input(manual_data_str)
-        for k, v in manual_parsed.items():
+        for k, v in sheet_data.items():
             combined_data[k] = v
             
         self.constituents = self.learn_from_data(combined_data)
         self.raw_data = combined_data 
         
-    def parse_manual_input(self, text):
-        data = {}
-        if not text: return data
-        for line in text.splitlines():
-            try:
-                parts = line.split()
-                if len(parts) >= 3:
-                    d_str, t_str, lvl_str = parts[0], parts[1], parts[2]
-                    lvl = int(lvl_str.replace("cm", ""))
-                    if d_str not in data: data[d_str] = []
-                    data[d_str].append((t_str, lvl))
-            except: pass
-        return data
-
     def learn_from_data(self, data_map):
         timestamps = []
         levels = []
         for date_str, peaks in data_map.items():
-            base = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-            for t_str, lvl in peaks:
-                h, m = map(int, t_str.split(":"))
-                dt = base.replace(hour=h, minute=m)
-                timestamps.append(dt.timestamp())
-                levels.append(lvl)
+            try:
+                base = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+                for t_str, lvl in peaks:
+                    h, m = map(int, t_str.split(":"))
+                    dt = base.replace(hour=h, minute=m)
+                    timestamps.append(dt.timestamp())
+                    levels.append(lvl)
+            except: continue
+        
         if not timestamps: return None
+
         speeds_deg_hr = [28.984, 30.000, 15.041, 13.943] 
         omegas = [s * (np.pi / 180) / 3600 for s in speeds_deg_hr]
+        
         t = np.array(timestamps)
         y = np.array(levels)
+        
         A = np.ones((len(t), 1))
         for w in omegas:
             A = np.hstack([A, np.cos(w * t)[:, None], np.sin(w * t)[:, None]])
+            
         coeffs, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
-        return {"mean": coeffs[0], "omegas": omegas, "coeffs": coeffs[1:]}
+        
+        return {
+            "mean": coeffs[0],
+            "omegas": omegas,
+            "coeffs": coeffs[1:]
+        }
 
     def predict_level(self, dt_obj):
         if not self.constituents: return 0
@@ -208,12 +221,14 @@ class SelfLearningTideModel:
                 last_t = p['time']
         return pd.DataFrame(res)
 
-    # データの最終日を取得するメソッド
     def get_max_date(self):
-        if not self.raw_data:
-            return None
-        all_dates = [datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in self.raw_data.keys()]
-        return max(all_dates)
+        if not self.raw_data: return None
+        all_dates = []
+        for d in self.raw_data.keys():
+            try:
+                all_dates.append(datetime.datetime.strptime(d, "%Y-%m-%d").date())
+            except: continue
+        return max(all_dates) if all_dates else None
 
 # ==========================================
 # 6. UI & 実行
@@ -235,50 +250,47 @@ def get_tide_name(m):
 
 if 'view_date' not in st.session_state:
     st.session_state['view_date'] = (datetime.datetime.now() + datetime.timedelta(hours=9)).date()
-if 'manual_input_text' not in st.session_state:
-    st.session_state['manual_input_text'] = ""
 
 view_date = st.session_state['view_date']
 st.markdown("<h5 style='margin-bottom:5px;'>⚓ 大西港フェリーターミナル 潮汐予測</h5>", unsafe_allow_html=True)
 
-# --------------------------------------------------------------------------
-# モデルの準備とデータ期間の計算 (サイドバー表示用)
-# --------------------------------------------------------------------------
-pressure = get_current_pressure()
-model = SelfLearningTideModel(TEACHER_DATA, st.session_state['manual_input_text'], pressure)
-data_max_date = model.get_max_date()
-
-# --------------------------------------------------------------------------
-# サイドバー
-# --------------------------------------------------------------------------
+# ------------------------------------
+# サイドバー (スプレッドシート連携)
+# ------------------------------------
 with st.sidebar:
     st.header("⚙️ 設定")
     
-    # 登録済みデータの期間を表示
-    if data_max_date:
-        st.success(f"📊 データ登録済み期間:\n～ {data_max_date.strftime('%Y/%m/%d')}")
-    else:
-        st.warning("データがありません")
-
-    st.subheader("🛠 データ不足時の対応")
-    with st.expander("将来のデータを追加する", expanded=False):
-        fetch_url = st.text_input("URLから取得 (釣割など)", value="https://tide.chowari.jp/34/344311/22694/")
-        if st.button("データ取得 (Scrape)"):
-            with st.spinner("データを解析中..."):
-                scraped_text = scrape_chowari_data(fetch_url)
-                if "エラー" in scraped_text: st.error(scraped_text)
-                else:
-                    st.success("取得成功！下の欄に追加しました。")
-                    if st.session_state['manual_input_text']: st.session_state['manual_input_text'] += "\n" + scraped_text
-                    else: st.session_state['manual_input_text'] = scraped_text
-        st.caption("手動入力またはURL取得したデータ:")
-        manual_input = st.text_area("追加データ (YYYY-MM-DD HH:MM Level)", value=st.session_state['manual_input_text'], height=200, key="manual_input_area")
-        st.session_state['manual_input_text'] = manual_input
+    st.subheader("📊 データ連携")
+    st.caption("Googleスプレッドシートのデータを自動で取り込みます。")
+    
+    # ユーザー提供のスプレッドシートIDから、CSV出力用URLを生成
+    # ID: 1jcPC_G9aU2sV77BcqLZYfMDAoPV9_HOQl-tVKhNV7qc
+    DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jcPC_G9aU2sV77BcqLZYfMDAoPV9_HOQl-tVKhNV7qc/export?format=csv"
+    
+    sheet_url = st.text_input("スプレッドシートURL(CSV)", value=DEFAULT_SHEET_URL)
+    
+    # データの読み込み
+    sheet_data = fetch_sheet_data(sheet_url)
+    
     st.markdown("---")
     target_cm = st.number_input("作業可能潮位 (cm以下)", value=120, step=10)
     start_h, end_h = st.slider("作業時間帯", 0, 24, (7, 23))
     st.markdown("---")
     if st.button("今日に戻る"): st.session_state['view_date'] = (datetime.datetime.now() + datetime.timedelta(hours=9)).date()
+
+# モデル生成 (内蔵 + シート)
+pressure = get_current_pressure()
+model = SelfLearningTideModel(TEACHER_DATA, sheet_data, pressure)
+data_max_date = model.get_max_date()
+
+# データの登録期間表示
+if data_max_date:
+    if data_max_date >= view_date:
+        st.sidebar.success(f"データ登録期間:\n～ {data_max_date.strftime('%Y/%m/%d')}")
+    else:
+        st.sidebar.warning(f"データ登録期間:\n～ {data_max_date.strftime('%Y/%m/%d')}\n(これ以降はAI予測です)")
+else:
+    st.sidebar.warning("データ未登録(内蔵のみ)")
 
 # データ生成
 df = model.get_dataframe(view_date, 5)
@@ -326,10 +338,10 @@ if df['is_safe'].any():
 fig, ax = plt.subplots(figsize=(10, 5))
 all_known_dates = list(model.raw_data.keys())
 if all_known_dates:
-    max_known_date = max([datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in all_known_dates])
-    teacher_end_dt = datetime.datetime.combine(max_known_date, datetime.time(23,59,59))
+    max_known_val = max([datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in all_known_dates])
+    teacher_end_dt = datetime.datetime.combine(max_known_val, datetime.time(23,59,59))
 else:
-    teacher_end_dt = datetime.datetime(2000,1,1) # dummy
+    teacher_end_dt = datetime.datetime(2000,1,1)
 
 ax.plot(df['time'], df['level'], '#0066cc', lw=1.5, ls='--', label="AI Forecast", zorder=1)
 df_solid = df[df['time'] <= teacher_end_dt]
@@ -344,7 +356,6 @@ if df['time'].iloc[0] <= teacher_end_dt <= df['time'].iloc[-1]:
 ax.axhline(target_cm, c='orange', ls='--', lw=1.5, label='Limit')
 ax.fill_between(df['time'], df['level'], target_cm, where=df['is_safe'], color='#ffcc00', alpha=0.4)
 
-# 現在位置のプロット (黄色い丸)
 gs, ge = df['time'].iloc[0], df['time'].iloc[-1]
 if gs <= curr_now <= ge:
     ax.scatter(curr_now, curr_lvl, c='gold', edgecolors='black', s=120, zorder=10, label="Now")
@@ -367,7 +378,6 @@ for w in safe_windows:
 ax.set_ylabel("Level (cm)")
 ax.grid(True, ls=':', alpha=0.6)
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n(%a)'))
-# エラー修正箇所: カッコを確実に閉じる
 ax.set_ylim(bottom=df['level'].min() - 30, top=df['level'].max() + 50)
 
 plt.tight_layout()
