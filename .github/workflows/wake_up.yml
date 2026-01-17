@@ -1,9 +1,9 @@
-name: Wake up Streamlit App
+ name: Wake up Streamlit App
 
 on:
   schedule:
-    # 2時間おきに実行 (分 時 日 月 曜日) UTC時間
-    - cron: "0 */2 * * *"
+    # 20分おきに実行 (分 時 日 月 曜日) UTC時間
+    - cron: "*/20 * * * *"
   workflow_dispatch: # 手動実行ボタンも有効化
 
 jobs:
@@ -12,6 +12,5 @@ jobs:
     steps:
       - name: Poke App
         run: |
-          # ここにあなたのアプリのURLを入れてください
+          # ここにアプリのURLを入れてください
           curl https://onishi.streamlit.app/
-
