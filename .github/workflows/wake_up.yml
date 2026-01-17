@@ -13,4 +13,4 @@ jobs:
       - name: Poke App
         run: |
           # ここにアプリのURLを入れてください
-          curl https://onishi.streamlit.app/
+          curl https://onishi.streamlit.app
