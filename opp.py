@@ -391,7 +391,7 @@ if safe_windows:
     cc = st.columns(2)
     chunks = np.array_split(rdf_display, 2)
     for i, col in enumerate(cc):
-        if i < len(chunks) and not chunks[i].empty:
+    if i < len(chunks) and chunks[i].size > 0:
             col.dataframe(chunks[i], hide_index=True, use_container_width=True)
 else:
     st.warning("この期間に作業可能な時間帯はありません。")
